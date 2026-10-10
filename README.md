@@ -173,47 +173,79 @@ Benchmarks (they load every core, so run them on an otherwise idle machine):
   runs fused pipelines (with cede, without yields, direct loop, dedicated pool).
 * `sbt "bench/runMain strom.bench.check"`: all variants compute the same result.
 
-## Numbers (JMH, Apple M1 (4P+4E), JDK 23)
+## Numbers
 
-Throughput, ns per element / bytes allocated per element:
+Measured with JMH on an Apple M1 (4 performance + 4 efficiency cores), JDK 23.
+**Lower is better in every table.** The rows come from a few separate runs.
 
-| | 7 cheap stages + sum | flatMap + zip + filter + take + sum |
+### Throughput: how fast and how much garbage
+
+Each cell is *nanoseconds per element / bytes allocated per element*. Time per element is the
+pipeline machinery's cost. Bytes per element is garbage the GC must collect later; 0 is the goal,
+because garbage costs GC pauses on top of the time shown.
+
+| | A: 7 cheap stages + sum | B: flatMap + zip + filter + take + sum |
 |---|---|---|
-| hand-written `while` | 4.6 / 0 | — |
+| hand-written `while` loop (the floor) | 4.6 / 0 | — |
 | `Strom.run` (direct) | 4.7 / 0 | 3.3 / 0 |
-| segment + raw runner | 5.1 / 0 | 4.1 / 0 |
-| segment via ZIO adapter | 5.7 / 4.3 | — |
-| segment via fs2 adapter | 5.9 / 1.4 | 7.4 / 23 |
-| **plain fs2 code in `StromFs2.fused`** | **6.2 / 1.4** | **8.3 / 36** |
+| Ström segment, raw runner | 5.1 / 0 | 4.1 / 0 |
+| Ström via ZIO adapter | 5.7 / 4.3 | — |
+| Ström via fs2 adapter | 5.9 / 1.4 | 7.4 / 23 |
+| **plain fs2 code wrapped in `StromFs2.fused`** | **6.2 / 1.4** | **8.3 / 36** |
 | plain fs2 | 52 / 108 | 825 / 3269 |
 | plain ZStream | 31 / 147 | 641 / 1519 |
 | Scala iterator | 74 / 80 | — |
 
-Scaling of a replicated tier (8 stages, ~20 ops per element), ns per element:
+How to read it:
+* **Good:** fused code is within ~1.5 ns of a hand-written loop, the best possible. Wrapping
+  ordinary fs2 code in `fused` makes pipeline A ~8× faster and pipeline B ~100× faster, with
+  ~1 byte of garbage per element instead of 100+.
+* **Why B gains so much:** plain `flatMap` + `zip` builds many small streams and pulls per element.
+  Fusion turns them into nested loops.
+* **Where the remaining cost goes:** the fs2 path is ~1.3× the raw loop: per-chunk adapter work
+  (copying output chunks, the effect system's step loop). Its allocation is per chunk, not per element.
+* **What it means for an app:** the gain applies to the time spent *in stream machinery*.
+  - CPU-heavy pure pipelines: large gains.
+  - Pipelines dominated by I/O or effects (`evalMap`, DB calls): small gains, though less garbage
+    still helps tail latency.
 
-| parallelism | 1 | 2 | 4 | 8 |
+### Scaling: does it use more cores?
+
+Nanoseconds per element for one stateless pipeline (~20 operations per element) split over N
+workers. Lower is better; halving it when N doubles would be perfect scaling.
+
+| workers | 1 | 2 | 4 | 8 |
 |---|---|---|---|---|
 | loom executor | 8.0 | 4.1 | 2.2 | 1.9 |
 | fs2 executor | 8.3 | 4.7 | 2.9 | 2.8 |
-| sequential segment | 7.4 | | | |
+| single thread, no executor | 7.4 | | | |
 
-I/O latency under CPU load: a fiber sleeps 1 ms in a loop while 8 fibers (one per core) run fused
-pipelines on the cats-effect runtime (`sbt "bench/runMain strom.bench.Latency"`):
+* **Good:** near-perfect scaling up to 4 workers (8.0 → 2.2 ns, ~3.6×). The executor's own
+  overhead is small: 1 worker ≈ the single-thread baseline.
+* **Limited:** 4 → 8 adds little. The M1's other 4 cores are slower efficiency cores, and the
+  pipeline starts to be limited by memory bandwidth. fs2 flattens earlier (more coordination per chunk).
+* Measured before the 100 µs time-slice change; ZIO scaling (`zioPar`) has not been run yet.
 
-| load | timer lateness p50 | p99 |
+### Responsiveness: does fused work starve other tasks?
+
+A timer fiber sleeps 1 ms in a loop while all 8 cores run fused pipelines on the cats-effect
+runtime. The table shows how late the timer wakes up. Lower is better: lateness is the delay any
+request or I/O callback would see.
+
+| load | typical (p50) | worst 1% (p99) |
 |---|---|---|
-| none | 0.52 ms | 0.63 ms |
-| segments, default (`cede` once per 100 µs slice) | 0.13 ms | 2.9 ms |
-| segments, budget `Int.MaxValue` (never yield) | 1.4 s | 2.8 s |
-| direct fused loop in one `IO.delay` | starved (≈ 2 ticks in 110 s) | |
-| segments on a dedicated pool (`evalOn`) | 0.53 ms | 1.7 ms |
+| no load (baseline) | 0.52 ms | 0.63 ms |
+| Ström default: yields every 100 µs | 0.13 ms | 2.9 ms |
+| Ström told never to yield | 1.4 s | 2.8 s |
+| one fused loop with no yield points at all | starved: ~2 ticks in 110 s | |
+| Ström on a dedicated thread pool (`evalOn`) | 0.53 ms | 1.7 ms |
 
-A segment returns to its runner every `budget` steps (default 1024); the runner yields to the
-scheduler only once per time slice (default 100 µs), because a `cede` costs microseconds. With the
-slice, adapter throughput is unchanged (fs2 cheap stages: 5.9 ns/elem) while the timer's p99
-stays ≈ 3 ms on a fully loaded machine.
-
-The adapters allocate per chunk or per step, never per element.
+* **Good:** with the default settings other work stays responsive (p99 ≈ 3 ms on a completely
+  saturated machine). Without yielding, the same work blocks the timer for seconds.
+* **Best:** running fused work on its own thread pool keeps latency close to an idle machine.
+* **How:** a segment returns to its runner every `budget` steps (default 1024). The runner hands
+  control back to the scheduler only once per 100 µs slice, because each hand-off costs a few
+  microseconds. That keeps throughput unchanged.
 
 ## Limits (v1)
 

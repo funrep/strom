@@ -18,6 +18,9 @@ object Pipe:
     def apply(x: Expr[A], y: Expr[B])(using Quotes): Expr[C] = f(x, y)
   final class Inner[A, B](f: Quotes ?=> Expr[A] => Pipe[B]):
     def apply(x: Expr[A])(using Quotes): Pipe[B] = f(x)
+  /** A partial function: calls the continuation with the result at most once. */
+  final class Partial[A, B](f: Quotes ?=> (Expr[A], Expr[B] => Expr[Unit]) => Expr[Unit]):
+    def apply(x: Expr[A], k: Expr[B] => Expr[Unit])(using Quotes): Expr[Unit] = f(x, k)
 
   final case class SrcArray[A: Type](arr: Expr[Array[A]]) extends Pipe[A]
   final case class SrcRange(from: Expr[Int], until: Expr[Int])(using Type[Int]) extends Pipe[Int]
@@ -28,6 +31,13 @@ object Pipe:
   final case class FlatMapP[A, B: Type](up: Pipe[A], f: Inner[A, B]) extends Pipe[B]
   final case class TakeP[A: Type](up: Pipe[A], n: Expr[Long]) extends Pipe[A]
   final case class ZipWithP[A, B, C: Type](l: Pipe[A], r: Pipe[B], f: Fn2[A, B, C]) extends Pipe[C]
+  final case class CollectP[A, B: Type](up: Pipe[A], pf: Partial[A, B]) extends Pipe[B]
+  final case class MapOptionP[A, B: Type](up: Pipe[A], f: Fn1[A, Option[B]]) extends Pipe[B]
+  final case class ZipWithIndexP[A](up: Pipe[A])(using Type[(A, Long)]) extends Pipe[(A, Long)]
+  final case class ScanP[A, S: Type](up: Pipe[A], z: Expr[S], op: Fn2[S, A, S]) extends Pipe[S]
+  final case class DropP[A: Type](up: Pipe[A], n: Expr[Long]) extends Pipe[A]
+  final case class TakeWhileP[A: Type](up: Pipe[A], p: Fn1[A, Boolean]) extends Pipe[A]
+  final case class DropWhileP[A: Type](up: Pipe[A], p: Fn1[A, Boolean]) extends Pipe[A]
   final case class WindowFoldP[A, S: Type](up: Pipe[A], size: Expr[Int], z: Expr[S], op: Fn2[S, A, S])
       extends Pipe[S]
 
@@ -58,6 +68,13 @@ object Pipe:
     case _: TakeP[?]              => StageInfo("take", stateless = false, Cardinality.Bounded)
     case _: ZipWithP[?, ?, ?]     => StageInfo("zipWith", stateless = false, Cardinality.OneToOne)
     case _: WindowFoldP[?, ?]     => StageInfo("windowFold", stateless = false, Cardinality.AtMostOne)
+    case _: CollectP[?, ?]        => StageInfo("collect", stateless = true, Cardinality.AtMostOne)
+    case _: MapOptionP[?, ?]      => StageInfo("mapFilter", stateless = true, Cardinality.AtMostOne)
+    case _: ZipWithIndexP[?]      => StageInfo("zipWithIndex", stateless = false, Cardinality.OneToOne)
+    case _: ScanP[?, ?]           => StageInfo("scan", stateless = false, Cardinality.OneToOne)
+    case _: DropP[?]              => StageInfo("drop", stateless = false, Cardinality.AtMostOne)
+    case _: TakeWhileP[?]         => StageInfo("takeWhile", stateless = false, Cardinality.Bounded)
+    case _: DropWhileP[?]         => StageInfo("dropWhile", stateless = false, Cardinality.AtMostOne)
 
   /** Pre-order listing of the operators of a pipeline. */
   def stages(p: Pipe[?]): List[StageInfo] = p match
@@ -68,6 +85,23 @@ object Pipe:
     case TakeP(up, _)               => stages(up) :+ stageInfo(p)
     case ZipWithP(l, r, _)          => (stages(l) ++ stages(r)) :+ stageInfo(p)
     case WindowFoldP(up, _, _, _)   => stages(up) :+ stageInfo(p)
+    case _ => stages(child(p)) :+ stageInfo(p)
+
+  /** The upstream of a unary operator. */
+  def child(p: Pipe[?]): Pipe[?] = p match
+    case MapP(up, _) => up
+    case FilterP(up, _) => up
+    case FlatMapP(up, _) => up
+    case TakeP(up, _) => up
+    case WindowFoldP(up, _, _, _) => up
+    case CollectP(up, _) => up
+    case MapOptionP(up, _) => up
+    case ZipWithIndexP(up) => up
+    case ScanP(up, _, _) => up
+    case DropP(up, _) => up
+    case TakeWhileP(up, _) => up
+    case DropWhileP(up, _) => up
+    case other => throw IllegalArgumentException(s"not a unary operator: $other")
 
   def planInfo(sink: Sink, inputs: Int): PlanInfo = sink match
     case f: FoldSink[?, ?] =>

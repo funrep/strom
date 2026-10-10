@@ -43,3 +43,18 @@ object Pipelines:
   inline def flatMapArray(arr: Array[Int]) = (a: Strom[Int]) =>
     a.flatMap(x => Strom.fromArray(arr).map(_ * x).take(x % 4))
   inline def bytes = (a: Strom[Int]) => a.map(_.toByte).filter(_ > 3).windowFold(2)(0.toByte)((s, x) => (s + x).toByte)
+
+  // ---- operators added for fs2 / ZIO coverage
+  inline def collected = (a: Strom[Int]) => a.collect { case x if x % 3 == 0 => x * 10; case 7 => -7 }
+  inline def collectTuple = (a: Strom[Int], b: Strom[Int]) =>
+    a.zip(b).collect { case (x, y) if x < y => x - y }.filter(_ != -3)
+  inline def optional = (a: Strom[Int]) => a.mapFilter(x => if x > 4 then Some(x.toLong * 2) else None)
+  inline def indexed = (a: Strom[Int]) => a.zipWithIndex.map((x, i) => x * 1000 + i.toInt).filter(_ % 2 == 0)
+  inline def scanned = (a: Strom[Int]) => a.filter(_ > 0).scan(0L)(_ + _).drop(2)
+  inline def whiles = (a: Strom[Int]) => a.dropWhile(_ < 10).takeWhile(_ != 13).map(_ + 1)
+  inline def nestedNew = (a: Strom[Int]) =>
+    a.flatMap(x => Strom.range(0, x % 6).dropWhile(_ < 1).takeWhile(_ < 4).collect { case y if y != 2 => y * x })
+      .scan(1)(_ + _).takeWhile(_ < 500)
+  inline def zipScan = (a: Strom[Int], b: Strom[Int]) =>
+    a.scan(0)(_ + _).zipWith(b.drop(3).zipWithIndex)((s, t) => s + t._1 + t._2.toInt)
+

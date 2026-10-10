@@ -16,6 +16,10 @@ class DirectSuite extends munit.FunSuite:
   inline def nested3(a: Array[Int]) =
     Strom.fromArray(a).flatMap(x => Strom.range(0, x % 4).flatMap(y => Strom.range(y, x % 6))).take(77).count
 
+  inline def newOps(a: Array[Int]) =
+    Strom.fromArray(a).dropWhile(_ < 3).collect { case x if x % 2 == 0 => x / 2 }.zipWithIndex
+      .map((x, i) => x + i.toInt).scan(0)(_ + _).takeWhile(_ < 400).drop(1).mapFilter(x => Option.when(x % 3 != 0)(x)).sum
+
   def ints(r: Random) = Array.fill(r.nextInt(40))(r.nextInt(60) - 10)
 
   test("direct pipelines agree with the reference") {
@@ -28,6 +32,7 @@ class DirectSuite extends munit.FunSuite:
       assertEquals(Strom.run(zipFiltered(a, b)), Reference.run(zipFiltered(a, b)))
       assertEquals(Strom.run(windows(a)), Reference.run(windows(a)))
       assertEquals(Strom.run(nested3(a)), Reference.run(nested3(a)))
+      assertEquals(Strom.run(newOps(a)), Reference.run(newOps(a)))
       val s = a.map(x => "x" * (x % 3 max 0))
       assertEquals(Strom.run(strs(s)), Reference.run(strs(s)))
   }

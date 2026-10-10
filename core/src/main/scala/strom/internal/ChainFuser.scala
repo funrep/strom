@@ -20,6 +20,14 @@ abstract class ChainFuser(using val q: Quotes):
     case FlatMap(f: Term)
     case ZipWith(that: Term, f: Term)
     case Fold(z: Term, op: Term)
+    case Collect(pf: Term)
+    case MapOption(f: Term)
+    case ZipWithIndex()
+    case Scan(z: Term, op: Term)
+    /** `n` must be a `Long` term. */
+    case Drop(n: Term)
+    case TakeWhile(p: Term)
+    case DropWhile(p: Term)
 
   protected def streamClass: Symbol
   /** Element type of a stream type. */
@@ -50,7 +58,17 @@ abstract class ChainFuser(using val q: Quotes):
     case Inlined(_, Nil, e) => strip(e)
     case Typed(e, _)        => strip(e)
     case Block(Nil, e)      => strip(e)
+    // Default/named arguments: `{ val qual$1 = s; val x$2 = qual$1.op$default$2; qual$1.op(p, x$2) }`.
+    // Stream values are pure descriptions, so the synthetic vals can be substituted back.
+    case Block(stats, e) if stats.forall(isSyntheticVal) =>
+      val vals = stats.collect { case v: ValDef => v }
+      strip(vals.foldRight(e)((v, acc) => Frontend.subst(acc, List(v.symbol), List(v.rhs.get.asExpr)).asInstanceOf[Term]))
     case _                  => t
+
+  private def isSyntheticVal(s: Statement): Boolean = s match
+    case v: ValDef => v.rhs.isDefined && !v.symbol.flags.is(Flags.Mutable) &&
+      (v.symbol.flags.is(Flags.Synthetic) || v.name.contains("$"))
+    case _ => false
 
   protected def isStream(t: TypeRepr): Boolean = t.widen.dealias.typeSymbol == streamClass
 
@@ -125,12 +143,14 @@ abstract class ChainFuser(using val q: Quotes):
       case _ => true
     })
 
-  private def op(c: Call): Option[PureOp] = (if c.name.endsWith("*") then None else pureOp(c)).filter {
+  private def op(c: Call): Option[PureOp] = pureOp(c).filter {
     case PureOp.FlatMap(f) => lambda1(f).exists((_, body) => pureInner(body))
     case _ => true
   }
 
-  private def name(o: PureOp): String = o.productPrefix.updated(0, o.productPrefix.head.toLower)
+  private def name(o: PureOp): String = o match
+    case _: PureOp.MapOption => "mapFilter"
+    case _ => o.productPrefix.updated(0, o.productPrefix.head.toLower)
 
   final class Run(val original: Term, var pipe: Pipe[?], var inputs: Vector[(Term, TypeRepr)]):
     var calls = Vector.empty[Call]
@@ -197,11 +217,26 @@ abstract class ChainFuser(using val q: Quotes):
               innerPipe(Frontend.subst(body, List(param), List(x))).asInstanceOf[Pipe[b]]
             })
           case PureOp.ZipWith(that, f) =>
-            val port = r.inputs.size
             elemOf(that.tpe).asType match
               case '[t] =>
-                r.inputs :+= (fuse(that) -> elemOf(that.tpe))
-                r.pipe = Pipe.ZipWithP[a, t, b](up, Pipe.SrcPort[t](port), front.fn2[a, t, b](f.asExprOf[(a, t) => b]))
+                // A pure operand (a range plus pure operators) joins this segment; anything else
+                // is fused on its own and becomes another input.
+                val right =
+                  if pureInner(that) then innerPipe(that).asInstanceOf[Pipe[t]]
+                  else
+                    val port = r.inputs.size
+                    r.inputs :+= (fuse(that) -> elemOf(that.tpe))
+                    Pipe.SrcPort[t](port)
+                r.pipe = Pipe.ZipWithP[a, t, b](up, right, front.fn2[a, t, b](f.asExprOf[(a, t) => b]))
+          case PureOp.Collect(pf) => r.pipe = Pipe.CollectP[a, b](up, front.partial[a, b](pf.asExprOf[PartialFunction[a, b]]))
+          case PureOp.MapOption(f) =>
+            r.pipe = Pipe.MapOptionP[a, b](up, front.fn1[a, Option[b]](f.asExprOf[a => Option[b]]))
+          case PureOp.ZipWithIndex() =>
+            r.pipe = Pipe.ZipWithIndexP[a](up)(using Type.of[b].asInstanceOf[Type[(a, Long)]])
+          case PureOp.Scan(z, f) => r.pipe = Pipe.ScanP[a, b](up, z.asExprOf[b], front.fn2[b, a, b](f.asExprOf[(b, a) => b]))
+          case PureOp.Drop(n) => r.pipe = Pipe.DropP[a](up, n.asExprOf[Long])
+          case PureOp.TakeWhile(p) => r.pipe = Pipe.TakeWhileP[a](up, front.fn1[a, Boolean](p.asExprOf[a => Boolean]))
+          case PureOp.DropWhile(p) => r.pipe = Pipe.DropWhileP[a](up, front.fn1[a, Boolean](p.asExprOf[a => Boolean]))
           case PureOp.Fold(z, f) =>
             r.fold = Some(Pipe.FoldSink[a, b](up, z.asExprOf[b], front.fn2[b, a, b](f.asExprOf[(b, a) => b]), associative = false))
 

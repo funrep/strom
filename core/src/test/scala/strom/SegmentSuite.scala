@@ -70,6 +70,15 @@ class SegmentSuite extends munit.FunSuite:
   check1("flatMap over captured array", Strom.segment(flatMapArray(arr)), flatMapArray(arr))
   check1("Byte elements", Strom.segment(bytes), bytes)
 
+  check1("collect", Strom.segment(collected), collected)
+  check2("collect on tuples", Strom.segment2(collectTuple), collectTuple)
+  check1("mapFilter", Strom.segment(optional), optional)
+  check1("zipWithIndex", Strom.segment(indexed), indexed)
+  check1("scan + drop", Strom.segment(scanned), scanned)
+  check1("dropWhile + takeWhile", Strom.segment(whiles), whiles)
+  check1("new operators inside flatMap", Strom.segment(nestedNew), nestedNew)
+  check2("scan zipped with indexed drop", Strom.segment2(zipScan), zipScan)
+
   test("plan metadata") {
     val f = Strom.foldSegment2(representative(3))
     assert(!f.plan.stateless)

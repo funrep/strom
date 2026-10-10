@@ -220,6 +220,77 @@ final class Gen(using val q: Quotes)(
             st => k => u.step(st)(a => '{ if (${ pred(a) }) ${ k(a) } }), u.suspends)(using u.tpe), u, "|filter"))
     case n: Nested[A, b] => Nested[A, b](n.p, x => filter(n.f(x), pred))(using n.tpe)
 
+  /** A partial map: `tr(a, k)` calls `k` at most once, so every producer becomes `AtMost1`. */
+  def mapPartial[A, B: Type](s: StStream[A], tr: (Expr[A], Expr[B] => Expr[Unit]) => Expr[Unit], label: String): StStream[B] =
+    s match
+      case Linear(p) =>
+        forUnfold(p) match
+          case u: UnfoldP[A, st] =>
+            Linear(derived(UnfoldP[B, st](u.init, u.term, Card.AtMost1, st => k => u.step(st)(a => tr(a, k)), u.suspends), u, "|" + label))
+      case n: Nested[A, b] => Nested[B, b](n.p, x => mapPartial(n.f(x), tr, label))
+
+  /** Runs `pre` when the stream (its outermost producer) starts. */
+  private def withOuterInit[A](s: StStream[A], pre: () => Expr[Unit]): StStream[A] = s match
+    case Linear(p)       => Linear(withInit(p, pre))
+    case n: Nested[A, b] => Nested[A, b](withInit(n.p, pre), n.f)(using n.tpe)
+
+  def mapOption[A, B: Type](s: StStream[A], f: Expr[A] => Expr[Option[B]]): StStream[B] =
+    mapPartial[A, B](s, (a, k) => bind("o", f(a)) { o =>
+      val body = k('{ $o.get })
+      '{ if ($o.isDefined) $body }
+    }, "mapFilter")
+
+  def zipWithIndex[A](s: StStream[A]): StStream[(A, Long)] =
+    given Type[A] = s.tpe
+    val idx = alloc[Long]("idx")
+    mapRaw[A, (A, Long)](withOuterInit(s, () => idx := '{ 0L }),
+      a => k => bind("i", idx.get)(i => seq(idx := '{ $i + 1L }, letIn('{ ($a, $i) })(k))))
+
+  def drop[A](s: StStream[A], n: Expr[Long]): StStream[A] =
+    given Type[A] = s.tpe
+    val rem = alloc[Long]("drop")
+    mapPartial[A, A](withOuterInit(s, () => rem := n), (a, k) => {
+      val body = k(a)
+      val dec = rem := '{ ${ rem.get } - 1L }
+      '{ if (${ rem.get } > 0L) $dec else $body }
+    }, "drop")
+
+  /** Stops every loop at the first element failing `p` (like `take`, pushed into all loops). */
+  def takeWhile[A](s: StStream[A], p: Expr[A] => Expr[Boolean]): StStream[A] =
+    given Type[A] = s.tpe
+    val going = alloc[Boolean]("going")
+    val s1 = withOuterInit(moreTermination(s, () => going.get), () => going := '{ true })
+    mapPartial[A, A](s1, (a, k) => {
+      val body = k(a)
+      val stop = going := '{ false }
+      '{ if (${ p(a) }) $body else $stop }
+    }, "takeWhile")
+
+  def dropWhile[A](s: StStream[A], p: Expr[A] => Expr[Boolean]): StStream[A] =
+    given Type[A] = s.tpe
+    val dropping = alloc[Boolean]("dropping")
+    mapPartial[A, A](withOuterInit(s, () => dropping := '{ true }), (a, k) => {
+      val body = seq(dropping := '{ false }, k(a))
+      '{ if (${ dropping.get } && ${ p(a) }) () else $body }
+    }, "dropWhile")
+
+  /** Emits `z`, then the running fold. A pull over the upstream; the continuation is spliced once. */
+  def scan[A, S: Type](s: StStream[A], z: Expr[S], op: (Expr[S], Expr[A]) => Expr[S]): StStream[S] =
+    val acc = alloc[S]("scan")
+    val started = alloc[Boolean]("started")
+    val emit = alloc[Boolean]("emit")
+    val pl = pull(s)
+    Linear(labeled(UnfoldP[S, Unit](
+      k => seq(acc := z, started := '{ false }, emit := '{ false }, pl.init, k(())),
+      _ => '{ !${ started.get } || !${ pl.ended.get } },
+      Card.AtMost1,
+      _ => k =>
+        val first = seq(started := '{ true }, emit := '{ true })
+        val next = seq(pl.have := '{ false }, acc := op(acc.get, pl.cur.get), emit := '{ true })
+        val out = seq(emit := '{ false }, bind("s", acc.get)(k))
+        seq('{ if (!${ started.get }) $first else { ${ pl.fill }; if (${ pl.have.get }) $next } }, '{ if (${ emit.get }) $out }),
+      suspends(s)), "scan").tap(_.composite = true))
+
   def flatMap[A, B: Type](s: StStream[A], f: Expr[A] => StStream[B]): StStream[B] = s match
     case Linear(p)       => Nested[B, A](p, f)
     case n: Nested[A, c] => Nested[B, c](n.p, x => flatMap(n.f(x), f))
@@ -419,6 +490,13 @@ final class Gen(using val q: Quotes)(
       case Pipe.TakeP(up, n) => take(lower(up), n)
       case Pipe.ZipWithP(l, r, f) => zipWith(lower(l), lower(r), f(_, _))
       case Pipe.WindowFoldP(up, size, z, op) => windowFold(lower(up), size, z, op(_, _))
+      case c: Pipe.CollectP[a, b] => mapPartial[a, b](lower(c.up), (x, k) => c.pf(x, k), "collect")(using c.tpe)
+      case m: Pipe.MapOptionP[a, b] => mapOption[a, b](lower(m.up), m.f(_))(using m.tpe)
+      case Pipe.ZipWithIndexP(up) => zipWithIndex(lower(up)).asInstanceOf[StStream[A]]
+      case sc: Pipe.ScanP[a, s] => scan[a, s](lower(sc.up), sc.z, sc.op(_, _))(using sc.tpe)
+      case Pipe.DropP(up, n) => drop(lower(up), n)
+      case Pipe.TakeWhileP(up, pr) => takeWhile(lower(up), pr(_))
+      case Pipe.DropWhileP(up, pr) => dropWhile(lower(up), pr(_))
 
   /** An input port: yields buffered elements, suspends with `NeedInput(n)` when the buffer is
    *  empty and the port has not ended. */

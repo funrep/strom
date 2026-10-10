@@ -88,12 +88,15 @@ StromZio.fused { in.map(f).filter(p).mapZIO(save).map(g) }
 
 Each maximal run of pure operators becomes one compiled segment. Everything else (effects,
 time, concurrency, operators it doesn't know) is kept exactly as written, between the runs.
-`StromFs2.fusedPlan(…)` / `StromZio.fusedPlan(…)` return what was fused, as a compile-time string.
+`StromFs2.fusedPlan(…)` / `StromZio.fusedPlan(…)` return what was fused and which operators were
+kept, as a compile-time string. Calls through cats syntax (`mapFilter`), extension methods and
+default arguments (`takeWhile(p)`) are recognised. `examples/` is a standalone project that uses the
+published artifacts on realistic fs2 / ZIO pipelines.
 
 | | fs2 | ZIO |
 |---|---|---|
-| fused operators | `map`, `filter`, `take`, `fold`, `zipWith`, `flatMap` onto `Stream.range` | `map`, `filter`, `take`, `flatMap` onto `ZStream.range` |
-| inputs per run | up to 4 (`zipWith`) | 1 |
+| fused operators | `map`, `filter`, `collect`, `mapFilter` (cats syntax), `take`, `drop`, `takeWhile`, `dropWhile`, `zipWithIndex`, `scan`, `fold`, `zipWith`, `flatMap` onto `Stream.range` | `map`, `filter`, `collect`, `take`, `drop`, `takeWhile`, `dropWhile`, `zipWithIndex`, `scan`, `zipWith`, `flatMap` onto `ZStream.range` |
+| inputs per run | up to 4 (`zipWith`; a pure `zipWith` operand is inlined instead) | up to 4 |
 | yields to the scheduler | `cede` when a `Spawn[F]` exists (not for `Pure`) | `yieldNow` |
 
 A run must be worth a segment boundary: two or more operators, or a `flatMap`, `zipWith` or `fold`.
@@ -200,4 +203,6 @@ The adapters allocate per chunk or per step, never per element.
 * Pipelines must be written inline (directly, or via `inline def`).
 * At most 4 input ports; the state slot pool (96 Int / 32 Long / 32 Double / 16 Float /
   96 Boolean / 48 reference slots) bounds pipeline size. Exceeding it is a compile error.
-* `zip` (tuples) allocates a tuple per element; use `zipWith` on the hot path.
+* `zip` and `zipWithIndex` allocate a tuple per element; use `zipWith` on the hot path.
+* `collect` is staged as a `match` only for partial-function literals; others go through
+  `isDefinedAt` / `apply`.

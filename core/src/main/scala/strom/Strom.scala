@@ -20,6 +20,16 @@ sealed abstract class Strom[A]:
   def zipWith[B, C](that: Strom[B])(f: (A, B) => C): Strom[C] = ZipWithN(this, that, f)
   /** Pairs elements. Allocates a tuple per element; prefer [[zipWith]] on the fused path. */
   def zip[B](that: Strom[B]): Strom[(A, B)] = ZipWithN(this, that, (a, b) => (a, b))
+  /** Maps the elements `pf` is defined at, drops the others. A literal is staged as a `match`. */
+  def collect[B](pf: PartialFunction[A, B]): Strom[B] = CollectN(this, pf)
+  def mapFilter[B](f: A => Option[B]): Strom[B] = MapFilterN(this, f)
+  /** Pairs elements with their index. Allocates a tuple per element. */
+  def zipWithIndex: Strom[(A, Long)] = ZipWithIndexN(this)
+  /** Emits `z`, then the running fold (like fs2 / ZIO `scan`). */
+  def scan[S](z: S)(op: (S, A) => S): Strom[S] = ScanN(this, z, op)
+  def drop(n: Long): Strom[A] = DropN(this, n)
+  def takeWhile(p: A => Boolean): Strom[A] = TakeWhileN(this, p)
+  def dropWhile(p: A => Boolean): Strom[A] = DropWhileN(this, p)
   /** Tumbling window of `size` elements, each folded with `op`; a final partial window is emitted. */
   def windowFold[S](size: Int)(z: S)(op: (S, A) => S): Strom[S] = WindowFoldN(this, size, z, op)
 
@@ -51,6 +61,13 @@ object Strom:
     final case class FlatMapN[A, B](up: Strom[A], f: A => Strom[B]) extends Strom[B]
     final case class TakeN[A](up: Strom[A], n: Int) extends Strom[A]
     final case class ZipWithN[A, B, C](l: Strom[A], r: Strom[B], f: (A, B) => C) extends Strom[C]
+    final case class CollectN[A, B](up: Strom[A], pf: PartialFunction[A, B]) extends Strom[B]
+    final case class MapFilterN[A, B](up: Strom[A], f: A => Option[B]) extends Strom[B]
+    final case class ZipWithIndexN[A](up: Strom[A]) extends Strom[(A, Long)]
+    final case class ScanN[A, S](up: Strom[A], z: S, op: (S, A) => S) extends Strom[S]
+    final case class DropN[A](up: Strom[A], n: Long) extends Strom[A]
+    final case class TakeWhileN[A](up: Strom[A], p: A => Boolean) extends Strom[A]
+    final case class DropWhileN[A](up: Strom[A], p: A => Boolean) extends Strom[A]
     final case class WindowFoldN[A, S](up: Strom[A], size: Int, z: S, op: (S, A) => S) extends Strom[S]
 
   // ------------------------------------------------------------------ staged entry points

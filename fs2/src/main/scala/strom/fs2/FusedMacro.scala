@@ -14,7 +14,8 @@ private[fs2] object FusedMacro:
     f.fuse(stream)
     Expr(f.summary)
 
-/** fs2 operators: `map`, `filter`, `take`, `fold`, `flatMap` (onto `Stream.range`), `zipWith`. */
+/** fs2 operators: `map`, `filter`, `take`, `fold`, `flatMap` (onto `Stream.range`), `zipWith`, `collect`,
+ *  `mapFilter` (cats syntax), `zipWithIndex`, `scan`, `drop`, `takeWhile`, `dropWhile`. */
 private[fs2] final class Fs2Fuser(using Quotes) extends ChainFuser:
   import q.reflect.*
 
@@ -36,11 +37,23 @@ private[fs2] final class Fs2Fuser(using Quotes) extends ChainFuser:
     case ("filter", List(List(p)))             => Some(PureOp.Filter(p))
     case ("take", List(List(n)))               => Some(PureOp.Take(n))
     case ("fold", List(List(z), List(f)))      => Some(PureOp.Fold(z, f))
+    case ("collect", List(List(pf)))           => Some(PureOp.Collect(pf))
+    case ("mapFilter*", List(List(f)))         => Some(PureOp.MapOption(f)) // cats FunctorFilter syntax
+    case ("zipWithIndex", Nil)                 => Some(PureOp.ZipWithIndex())
+    case ("scan", List(List(z), List(f)))      => Some(PureOp.Scan(z, f))
+    case ("drop", List(List(n)))               => Some(PureOp.Drop(n))
+    case ("dropWhile", List(List(p)))          => Some(PureOp.DropWhile(p))
+    // takeWhile(p, takeFailure = false) only
+    case ("takeWhile", List(List(p, flag))) if isFalse(flag) => Some(PureOp.TakeWhile(p))
     case ("flatMap", List(f) :: _)             => Some(PureOp.FlatMap(f))
     // zipWith[F2, O2 >: O, O3, O4]: only without widening of the left element type.
     case ("zipWith", List(List(that), List(f))) if c.targs.size == 4 && c.targs(1) =:= elemOf(c.qual.tpe) =>
       Some(PureOp.ZipWith(that, f))
     case _ => None
+
+  private def isFalse(t: Term): Boolean = strip(t) match
+    case Literal(BooleanConstant(false)) => true
+    case other => other.symbol.name.contains("$default$") // the default argument (false)
 
   protected def intRange(t: Term): Option[(Expr[Int], Expr[Int])] = asCall(strip(t)) match
     case Some(Call(_, qual, "range", _, List(a, b) :: _)) if qual.symbol == StreamModule && elemOf(t.tpe) =:= TypeRepr.of[Int] =>

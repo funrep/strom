@@ -22,6 +22,7 @@ object Parallel:
     case TakeP(up, _)    => prefix(up)
     case WindowFoldP(up, _, _, _) => prefix(up)
     case ZipWithP(l, r, _) => prefix(l).orElse(prefix(r))
+    case _ => if stateless(p) then grow(p, child(p)) else prefix(child(p))
 
   private def grow(p: Pipe[?], up: Pipe[?]): Option[Pipe[?]] =
     prefix(up).map(q => if (q eq up) && stateless(p) then p else q)
@@ -45,6 +46,27 @@ object Parallel:
       case m: WindowFoldP[a, s] =>
         given Type[s] = m.tpe
         WindowFoldP[a, s](replace(m.up, target, repl).asInstanceOf[Pipe[a]], m.size, m.z, m.op)
+      case m: CollectP[a, b] =>
+        given Type[b] = m.tpe
+        CollectP[a, b](replace(m.up, target, repl).asInstanceOf[Pipe[a]], m.pf)
+      case m: MapOptionP[a, b] =>
+        given Type[b] = m.tpe
+        MapOptionP[a, b](replace(m.up, target, repl).asInstanceOf[Pipe[a]], m.f)
+      case m: ZipWithIndexP[a] =>
+        given Type[(a, Long)] = m.tpe
+        ZipWithIndexP[a](replace(m.up, target, repl).asInstanceOf[Pipe[a]])
+      case m: ScanP[a, s] =>
+        given Type[s] = m.tpe
+        ScanP[a, s](replace(m.up, target, repl).asInstanceOf[Pipe[a]], m.z, m.op)
+      case m: DropP[a] =>
+        given Type[a] = m.tpe
+        DropP[a](replace(m.up, target, repl).asInstanceOf[Pipe[a]], m.n)
+      case m: TakeWhileP[a] =>
+        given Type[a] = m.tpe
+        TakeWhileP[a](replace(m.up, target, repl).asInstanceOf[Pipe[a]], m.p)
+      case m: DropWhileP[a] =>
+        given Type[a] = m.tpe
+        DropWhileP[a](replace(m.up, target, repl).asInstanceOf[Pipe[a]], m.p)
       case m: ZipWithP[a, b, c] =>
         given Type[c] = m.tpe
         ZipWithP[a, b, c](replace(m.l, target, repl).asInstanceOf[Pipe[a]], replace(m.r, target, repl).asInstanceOf[Pipe[b]], m.f)

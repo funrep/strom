@@ -32,8 +32,20 @@ class ZioFusedSuite extends munit.FunSuite:
     s => s.flatMap(x => ZStream.range(0, x % 5).map(_ * 2).filter(_ != 4)).map(_ + 1),
     s => StromZio.fused(s.flatMap(x => ZStream.range(0, x % 5).map(_ * 2).filter(_ != 4)).map(_ + 1)))
 
+  same("collect / zipWithIndex / scan / drop / takeWhile / dropWhile")(
+    s => s.collect { case x if x % 2 == 0 => x * 3 }.zipWithIndex.map((x, i) => x + i.toInt).dropWhile(_ < 3)
+      .scan(0L)(_ + _).drop(2).takeWhile(_ < 900L),
+    s => StromZio.fused(s.collect { case x if x % 2 == 0 => x * 3 }.zipWithIndex.map((x, i) => x + i.toInt).dropWhile(_ < 3)
+      .scan(0L)(_ + _).drop(2).takeWhile(_ < 900L)))
+
+  same("zipWith another stream and range sources")(
+    s => s.map(_ * 2).zipWith(ZStream.range(0, 1000).filter(_ % 3 == 0))(_ - _).take(40),
+    s => StromZio.fused(s.map(_ * 2).zipWith(ZStream.range(0, 1000).filter(_ % 3 == 0))(_ - _).take(40)))
+
   test("fusion actually happens") {
     def s: ZStream[Any, Nothing, Int] = ZStream.empty
     assertEquals(StromZio.fusedPlan(s.map(_ + 1).filter(_ > 0).mapZIO(x => ZIO.succeed(x)).map(_ * 2).take(9)),
       "fused: map → filter (1 inputs)\nfused: map → take (1 inputs)\nkept: mapZIO")
+    assertEquals(StromZio.fusedPlan(s.map(_ + 1).zipWith(ZStream.range(0, 9).map(_ * 2))(_ + _)),
+      "fused: map → zipWith (1 inputs)")
   }

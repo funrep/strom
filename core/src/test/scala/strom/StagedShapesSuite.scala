@@ -24,6 +24,12 @@ class StagedShapesSuite extends munit.FunSuite:
     case Take(s: Shape, n: Int)
     case Zip(l: Shape, r: Shape, f: Int)
     case Window(s: Shape, size: Int)
+    case Collect(s: Shape)
+    case Indexed(s: Shape)
+    case Scan(s: Shape)
+    case Drop(s: Shape, n: Int)
+    case TakeWhile(s: Shape, p: Int)
+    case DropWhile(s: Shape, p: Int)
 
   import Shape.*
 
@@ -56,6 +62,12 @@ class StagedShapesSuite extends munit.FunSuite:
     case Take(u, n)       => reference(u, ports, x).take(n)
     case Zip(l, r, f)     => reference(l, ports, x).zipWith(reference(r, ports, x))(zips(f)._1)
     case Window(u, k)     => reference(u, ports, x).windowFold(k)(0)(_ + _)
+    case Collect(u)       => reference(u, ports, x).collect { case v if v % 3 == 1 => v * 2 }
+    case Indexed(u)       => reference(u, ports, x).zipWithIndex.map((v, i) => v * 7 + i.toInt)
+    case Scan(u)          => reference(u, ports, x).scan(1)(_ + _)
+    case Drop(u, n)       => reference(u, ports, x).drop(n.toLong)
+    case TakeWhile(u, p)  => reference(u, ports, x).takeWhile(preds(p)._1)
+    case DropWhile(u, p)  => reference(u, ports, x).dropWhile(preds(p)._1)
 
   def staged(s: Shape, x: Option[Expr[Int]])(using Quotes): Pipe[Int] = s match
     case Port(n)          => Pipe.SrcPort[Int](n)
@@ -67,6 +79,16 @@ class StagedShapesSuite extends munit.FunSuite:
     case Take(u, n)       => Pipe.TakeP[Int](staged(u, x), Expr(n.toLong))
     case Zip(l, r, f)     => Pipe.ZipWithP[Int, Int, Int](staged(l, x), staged(r, x), Pipe.Fn2((a, b) => zips(f)._2(a, b)))
     case Window(u, k)     => Pipe.WindowFoldP[Int, Int](staged(u, x), Expr(k), '{ 0 }, Pipe.Fn2((a, b) => '{ $a + $b }))
+    case Collect(u)       => Pipe.CollectP[Int, Int](staged(u, x), Pipe.Partial { (v, k) =>
+                               val body = k('{ $v * 2 })
+                               '{ if ($v % 3 == 1) $body }
+                             })
+    case Indexed(u)       => Pipe.MapP[(Int, Long), Int](Pipe.ZipWithIndexP[Int](staged(u, x)),
+                               Pipe.Fn1(t => '{ $t._1 * 7 + $t._2.toInt }))
+    case Scan(u)          => Pipe.ScanP[Int, Int](staged(u, x), '{ 1 }, Pipe.Fn2((a, b) => '{ $a + $b }))
+    case Drop(u, n)       => Pipe.DropP[Int](staged(u, x), Expr(n.toLong))
+    case TakeWhile(u, p)  => Pipe.TakeWhileP[Int](staged(u, x), Pipe.Fn1(e => preds(p)._2(e)))
+    case DropWhile(u, p)  => Pipe.DropWhileP[Int](staged(u, x), Pipe.Fn1(e => preds(p)._2(e)))
 
   // ------------------------------------------------------------------ generator
 
@@ -78,7 +100,7 @@ class StagedShapesSuite extends munit.FunSuite:
       case _        => sys.error("leaf with several ports")
     if depth == 0 && ports.size <= 1 then leaf(ports)
     else
-      val choice = if ports.size == 2 then 5 else r.nextInt(8)
+      val choice = if ports.size == 2 then 5 else r.nextInt(14)
       def again(ps: List[Int]) = gen(r, ps, math.max(depth - 1, 0), inner)
       choice match
         case 0 => Map(again(ports), r.nextInt(maps.size))
@@ -91,6 +113,11 @@ class StagedShapesSuite extends munit.FunSuite:
             case List(a, b) => (List(a), List(b))
             case ps         => if r.nextBoolean() then (ps, Nil) else (Nil, ps)
           Zip(gen(r, lp, math.max(depth - 1, 0), inner), gen(r, rp, math.max(depth - 1, 0), inner), r.nextInt(zips.size))
+        case 8  => Collect(again(ports))
+        case 9  => Indexed(again(ports))
+        case 10 => Scan(again(ports))
+        case 11 => Drop(again(ports), r.nextInt(6) - 1)
+        case 12 => if r.nextBoolean() then TakeWhile(again(ports), r.nextInt(preds.size)) else DropWhile(again(ports), r.nextInt(preds.size))
         case _ => if ports.size <= 1 then leaf(ports) else again(ports)
 
   final case class Case(shape: Shape, inputs: Int, fold: Boolean)

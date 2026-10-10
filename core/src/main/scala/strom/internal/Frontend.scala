@@ -52,6 +52,24 @@ final class Frontend(using val q: Quotes):
       warnNotLiteral(other)
       Pipe.Fn2((x, y) => Expr.betaReduce('{ $f($x, $y) }))
 
+  /** A partial function literal `{ case … }` becomes a `match` whose cases call the
+   *  continuation; any other partial function is called through `isDefinedAt` / `apply`. */
+  def partial[A: Type, B: Type](pf: Expr[PartialFunction[A, B]]): Pipe.Partial[A, B] =
+    strip(pf.asTerm) match
+      case Lambda(List(p), body) =>
+        strip(body) match
+          case Match(sel, cases) => Pipe.Partial((x, k) => Frontend.staticMatch[B](sel, cases, p.symbol, x, k))
+          case _ => dynamicPartial(pf)
+      case other =>
+        warnNotLiteral(other)
+        dynamicPartial(pf)
+
+  private def dynamicPartial[A: Type, B: Type](pf: Expr[PartialFunction[A, B]]): Pipe.Partial[A, B] =
+    Pipe.Partial { (x, k) =>
+      val body = k('{ $pf.apply($x) })
+      '{ if ($pf.isDefinedAt($x)) $body }
+    }
+
   def parse(t0: Term, inner: Boolean): Pipe[?] =
     val t = strip(t0)
     t match
@@ -86,6 +104,16 @@ final class Frontend(using val q: Quotes):
           case '{ ($l: Strom[a]).zip[b]($r) } =>
             Pipe.ZipWithP[a, b, (a, b)](parse(l.asTerm, inner).asInstanceOf[Pipe[a]], parse(r.asTerm, inner).asInstanceOf[Pipe[b]],
               Pipe.Fn2((x, y) => '{ ($x, $y) }))
+          case '{ ($s: Strom[a]).collect[b]($pf) } =>
+            Pipe.CollectP[a, b](parse(s.asTerm, inner).asInstanceOf[Pipe[a]], partial(pf))
+          case '{ ($s: Strom[a]).mapFilter[b]($f) } =>
+            Pipe.MapOptionP[a, b](parse(s.asTerm, inner).asInstanceOf[Pipe[a]], fn1(f))
+          case '{ ($s: Strom[a]).zipWithIndex } => Pipe.ZipWithIndexP[a](parse(s.asTerm, inner).asInstanceOf[Pipe[a]])
+          case '{ ($s: Strom[a]).scan[st]($z)($op) } =>
+            Pipe.ScanP[a, st](parse(s.asTerm, inner).asInstanceOf[Pipe[a]], z, fn2(op))
+          case '{ ($s: Strom[a]).drop($n) } => Pipe.DropP[a](parse(s.asTerm, inner).asInstanceOf[Pipe[a]], n)
+          case '{ ($s: Strom[a]).takeWhile($p) } => Pipe.TakeWhileP[a](parse(s.asTerm, inner).asInstanceOf[Pipe[a]], fn1(p))
+          case '{ ($s: Strom[a]).dropWhile($p) } => Pipe.DropWhileP[a](parse(s.asTerm, inner).asInstanceOf[Pipe[a]], fn1(p))
           case '{ ($s: Strom[a]).windowFold[st]($size)($z)($op) } =>
             Pipe.WindowFoldP[a, st](parse(s.asTerm, inner).asInstanceOf[Pipe[a]], size, z, fn2(op))
           case _ =>
@@ -144,6 +172,22 @@ final class Frontend(using val q: Quotes):
     case _         => Pipe.Fn2((a, b) => '{ $num.plus($a, $b) })
 
 object Frontend:
+  /** `sel match { case p => k(body) …; case _ => () }` with the lambda parameter replaced by `x`. */
+  def staticMatch[B: Type](using q: Quotes)(sel: Any, cases: Any, param: Any, x: Expr[?], k: Expr[B] => Expr[Unit]): Expr[Unit] =
+    import q.reflect.*
+    val m = Map(param.asInstanceOf[Symbol] -> x.asTerm)
+    val mapper = new TreeMap:
+      override def transformTerm(t: Term)(owner: Symbol): Term = t match
+        case Ident(_) if m.contains(t.symbol) => m(t.symbol)
+        case _ => super.transformTerm(t)(owner)
+    val owner = Symbol.spliceOwner
+    val selector = mapper.transformTerm(sel.asInstanceOf[Term])(owner)
+    val cs = cases.asInstanceOf[List[CaseDef]].map { c =>
+      val c2 = mapper.transformCaseDef(c)(owner)
+      CaseDef.copy(c2)(c2.pattern, c2.guard, k(c2.rhs.asExprOf[B]).asTerm)
+    }
+    Match(selector, cs :+ CaseDef(Wildcard(), None, Literal(UnitConstant()))).changeOwner(owner).asExprOf[Unit]
+
   /** Beta-reduction by substitution: replaces references to `params` in `body` with `args`.
    *  Runs with the `Quotes` of the splice the result is used in; `body` and `params` come
    *  from the (outer) macro invocation, which is visible from any inner splice. */

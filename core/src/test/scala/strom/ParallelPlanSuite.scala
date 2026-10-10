@@ -84,6 +84,19 @@ class ParallelPlanSuite extends munit.FunSuite:
   inline def p9 = (a: Strom[Int]) => a.filter(_ > 0).windowFold(3)(0)(_ + _)
   check("cut at window", Strom.parallel(p9), "Replicated,Single", xs => emits(p9(Strom.fromSeq(xs))))
 
+  inline def p11 = (a: Strom[Int]) =>
+    a.flatMap(x => Strom.range(0, x % 4)).take(60).map(_ * 3).filter(_ % 2 == 0).flatMap(x => Strom.range(0, x % 3)).map(_ + 1)
+  check("multi-cut: replicated | take | replicated", Strom.parallel(p11), "Replicated,Single,Replicated",
+    xs => emits(p11(Strom.fromSeq(xs))))
+
+  inline def p12 = (a: Strom[Int]) => a.map(_ + 1).take(50).flatMap(x => Strom.range(0, x % 5)).map(_ * 2).sum
+  check("multi-cut ending in a partial fold", Strom.parallelFold(p12), "Replicated,Single,PartialFold",
+    xs => folds(p12(Strom.fromSeq(xs))))
+
+  inline def p13 = (a: Strom[Int]) => a.map(_ + 1).take(50).map(_ * 2).drop(3).filter(_ > 4).windowFold(2)(0)(_ + _)
+  check("light stateless runs stay fused; adjacent single tiers merge", Strom.parallel(p13), "Replicated,Single",
+    xs => emits(p13(Strom.fromSeq(xs))))
+
   inline def p10 = (a: Strom[Int]) => a.windowFold(2)(0)(_ * 10 + _)
   test("keyed: per-partition instances, same multiset as running the pipeline per partition") {
     val plan = Strom.parallelKeyed((x: Int) => x % 7)(p10)

@@ -25,6 +25,9 @@ class Fs2ParallelSuite extends munit.FunSuite:
   inline def cut = (a: Strom[Int]) => a.flatMap(x => Strom.range(0, x % 5)).filter(_ != 2).take(300).map(_ + 1)
   inline def partial = (a: Strom[Int]) => a.map(x => x * x).filter(_ % 3 != 0).sum
   inline def nonAssoc = (a: Strom[Int]) => a.map(_ * 2).fold(7)((s, x) => s * 31 + x)
+  inline def multi = (a: Strom[Int]) =>
+    a.flatMap(x => Strom.range(0, x % 4)).take(700).map(_ * 3).filter(_ % 2 == 0).flatMap(x => Strom.range(0, x % 3)).map(_ + 1)
+  inline def multiFold = (a: Strom[Int]) => a.map(_ + 1).take(900).flatMap(x => Strom.range(0, x % 5)).map(_ * 2).sum
   inline def windowed = (a: Strom[Int]) => a.windowFold(2)(0)(_ * 10 + _)
 
   def input(r: Random) = Array.fill(r.nextInt(2000))(r.nextInt(50) - 5)
@@ -38,6 +41,14 @@ class Fs2ParallelSuite extends munit.FunSuite:
       assertEquals(run(p2, xs, r, n), Reference.toList(cut(s)))
       assertEquals(run(p3, xs, r, n), List(Reference.run(partial(s))))
       assertEquals(run(p4, xs, r, n), List(Reference.run(nonAssoc(s))))
+  }
+
+  test("multi-cut plans") {
+    val (pm, pf) = (Strom.parallel(multi), Strom.parallelFold(multiFold)); val r = Random(8)
+    for _ <- 0 until 40 do
+      val xs = input(r); val n = 1 + r.nextInt(6); val s = Strom.fromSeq(xs.toSeq)
+      assertEquals(run(pm, xs, r, n), Reference.toList(multi(s)))
+      assertEquals(run(pf, xs, r, n), List(Reference.run(multiFold(s))))
   }
 
   test("keyed") {

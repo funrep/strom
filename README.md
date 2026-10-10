@@ -112,7 +112,8 @@ which calls are pure operators and how to run a segment.
 |---|---|
 | only stateless ops (`map`, `filter`, `flatMap`) | `Replicated`: N instances, one chunk each, outputs reordered (`ReorderBuffer`) |
 | stateless ops + `sum` / `count` / `foldAssociative` (element = result type) | `PartialFold`: per-chunk folds combined in input order |
-| stateless prefix, then a stateful op (`take`, `zipWith`, `windowFold`, other folds) | `Replicated` prefix, then `Single`: the pipeline is cut at the first stateful op |
+| stateless prefix, then a stateful op (`take`, `zipWith`, `windowFold`, `scan`, other folds…) | `Replicated` prefix, then `Single`: the pipeline is cut at the stateful op |
+| …then more stateless ops | light ones (< 3 ops, no `flatMap`) stay fused in the `Single` tier; heavy ones get another `Replicated` (or `PartialFold`) tier; adjacent `Single` tiers merge |
 | `parallelKeyed(key)(…)` | `Keyed`: one instance per partition; a staged partitioner (key function inlined, specialised to the element type) routes each chunk |
 
 Plans are pure data. The executors live in the adapters:
@@ -199,8 +200,8 @@ The adapters allocate per chunk or per step, never per element.
 
 ## Limits (v1)
 
-* Parallel plans support one-input pipelines and make one cut (later stateless ops after the
-  cut run in the single tier). ZIO has no parallel executor yet.
+* Parallel plans support one-input pipelines; the "heavy" rule for re-replicating after a
+  stateful operator is a fixed heuristic (no cost model).
 * Not fused (by design): fan-out (an input port is consumed once), effects inside segments,
   dynamic pipeline shapes. Those stay at the runtime level, between segments.
 * `flatMap` needs a lambda literal whose body is a `Strom` expression. Other functions may be

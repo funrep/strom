@@ -42,6 +42,9 @@ class LoomParallelSuite extends munit.FunSuite:
   inline def cut = (a: Strom[Int]) => a.flatMap(x => Strom.range(0, x % 5)).filter(_ != 2).take(300).map(_ + 1)
   inline def partial = (a: Strom[Int]) => a.map(x => x * x).filter(_ % 3 != 0).sum
   inline def nonAssoc = (a: Strom[Int]) => a.map(_ * 2).fold(7)((s, x) => s * 31 + x)
+  inline def multi = (a: Strom[Int]) =>
+    a.flatMap(x => Strom.range(0, x % 4)).take(700).map(_ * 3).filter(_ % 2 == 0).flatMap(x => Strom.range(0, x % 3)).map(_ + 1)
+  inline def multiFold = (a: Strom[Int]) => a.map(_ + 1).take(900).flatMap(x => Strom.range(0, x % 5)).map(_ * 2).sum
   inline def windowed = (a: Strom[Int]) => a.windowFold(2)(0)(_ * 10 + _)
 
   def randomInput(r: Random) = Array.fill(r.nextInt(2000))(r.nextInt(50) - 5)
@@ -72,6 +75,15 @@ class LoomParallelSuite extends munit.FunSuite:
     for _ <- 0 until 60 do
       val xs = randomInput(r)
       assertEquals(runPlan(plan, xs, configs(r), r)._2, Some(Reference.run(nonAssoc(Strom.fromSeq(xs.toSeq)))))
+  }
+
+  test("multi-cut plans") {
+    val (pm, pf) = (Strom.parallel(multi), Strom.parallelFold(multiFold)); val r = Random(8)
+    assertEquals(pm.tiers.map(_.productPrefix), Vector("Replicated", "Single", "Replicated"))
+    for _ <- 0 until 40 do
+      val xs = randomInput(r); val s = Strom.fromSeq(xs.toSeq)
+      assertEquals(runPlan(pm, xs, configs(r), r)._1, Reference.toList(multi(s)))
+      assertEquals(runPlan(pf, xs, configs(r), r)._2, Some(Reference.run(multiFold(s))))
   }
 
   test("keyed tier: per-partition state") {

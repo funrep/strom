@@ -3,29 +3,15 @@ package strom.internal
 import scala.quoted.*
 import strom.runtime.{KeyPartitioner, ParallelPlan, Partitioner, SegmentFactory, Tier}
 
-/** Plans the parallel execution of a one-input pipeline from its static metadata:
- *  the maximal *stateless* part that reads the input is replicated over N workers; an
- *  associative fold directly on it becomes per-chunk partial folds; everything from the first
- *  stateful operator on runs as a single instance (the pipeline is cut there). */
+/** Plans the parallel execution of a one-input pipeline from its static metadata. Along the
+ *  operators from the input port: stateless runs are replicated over N workers; each stateful
+ *  operator starts a single-instance tier (cut), which keeps light stateless operators after it
+ *  fused while heavy ones (an expansion, or several operators) get their own replicated tier;
+ *  an associative fold on a replicated run becomes per-chunk partial folds. */
 object Parallel:
   import Pipe.*
 
   private def stateless(p: Pipe[?]): Boolean = stageInfo(p).stateless
-
-  /** The largest stateless subtree that contains the input port, if `p` contains it. */
-  def prefix(p: Pipe[?]): Option[Pipe[?]] = p match
-    case _: SrcPort[?] => Some(p)
-    case _: SrcArray[?] | _: SrcRange => None
-    case MapP(up, _)     => grow(p, up)
-    case FilterP(up, _)  => grow(p, up)
-    case FlatMapP(up, _) => grow(p, up)
-    case TakeP(up, _)    => prefix(up)
-    case WindowFoldP(up, _, _, _) => prefix(up)
-    case ZipWithP(l, r, _) => prefix(l).orElse(prefix(r))
-    case _ => if stateless(p) then grow(p, child(p)) else prefix(child(p))
-
-  private def grow(p: Pipe[?], up: Pipe[?]): Option[Pipe[?]] =
-    prefix(up).map(q => if (q eq up) && stateless(p) then p else q)
 
   /** `p` with the subtree `target` (by identity) replaced by `repl`. */
   def replace(p: Pipe[?], target: Pipe[?], repl: Pipe[?])(using Quotes): Pipe[?] =
@@ -96,24 +82,90 @@ object Parallel:
           case '[a] =>
             val keyFn = front.fn1[a, Int](k.asExprOf[a => Int])
             List('{ Tier.Keyed(${ factory(sink, port) }, ${ partitioner[a](keyFn) }) })
-      case None =>
-        val up = upstream(sink)
-        val pre = prefix(up).get
-        sink match
-          case fs: FoldSink[a, s] if (fs.up eq pre) && fs.combine.isDefined =>
-            given Type[s] = fs.tpe
-            List('{ Tier.PartialFold(${ factory(sink, port) }, ${ combine[s](fs.combine.get) }) })
-          case _: EmitSink[?] if up eq pre =>
-            List('{ Tier.Replicated(${ factory(sink, port) }) })
-          case _ if pre.isInstanceOf[SrcPort[?]] =>
-            List('{ Tier.Single(${ factory(sink, port) }) })
-          case _ =>
-            pre.tpe match
-              case '[p] =>
-                val rest = replaceIn(sink, pre, SrcPort[p](0))
-                List('{ Tier.Replicated(${ factory(EmitSink(pre), port) }) },
-                     '{ Tier.Single(${ factory(rest, pre.tpe) }) })
+      case None => cutPlan(sink, port)
     '{ ParallelPlan[O](Vector(${ Varargs(tiers) }*), 1) }
+
+  // ------------------------------------------------------------------ multi-cut planning
+
+  private def containsPort(p: Pipe[?]): Boolean = p match
+    case _: SrcPort[?] => true
+    case _: SrcArray[?] | _: SrcRange => false
+    case ZipWithP(l, r, _) => containsPort(l) || containsPort(r)
+    case _ => containsPort(child(p))
+
+  /** The operators from the input port up to `p` (port first). A zip contributes itself; its
+   *  other operand stays attached to it. */
+  def pathNodes(p: Pipe[?]): List[Pipe[?]] = p match
+    case _: SrcPort[?] => List(p)
+    case z: ZipWithP[?, ?, ?] => (if containsPort(z.l) then pathNodes(z.l) else pathNodes(z.r)) :+ p
+    case _ => pathNodes(child(p)) :+ p
+
+  private enum Group:
+    case Repl(from: Int, to: Int)   // inclusive node indices
+    case Single(from: Int, to: Int) // may be empty (to = from - 1): a tier holding only the fold
+
+  /** Stateless operators worth their own replicated tier after a stateful one: an expansion,
+   *  or several operators. Lighter runs stay fused with the preceding stateful operator. */
+  private def heavy(run: Seq[Pipe[?]]): Boolean = run.exists(_.isInstanceOf[FlatMapP[?, ?]]) || run.size >= 3
+
+  private def cutPlan(sink: Sink, port: Type[?])(using Quotes): List[Expr[Tier]] =
+    val nodes = pathNodes(upstream(sink)).toVector
+    val n = nodes.size
+    val groups = collection.mutable.ArrayBuffer.empty[Group]
+    var i = 1
+    while i < n do
+      if stateless(nodes(i)) then
+        var j = i
+        while j + 1 < n && stateless(nodes(j + 1)) do j += 1
+        groups += Group.Repl(i, j)
+        i = j + 1
+      else
+        var k = i + 1
+        while k < n && stateless(nodes(k)) do k += 1
+        val run = nodes.slice(i + 1, k)
+        val (from, to, next) = if run.nonEmpty && heavy(run) then (i, i, i + 1) else (i, k - 1, k)
+        // Adjacent single-instance tiers gain no parallelism: merge them.
+        groups.lastOption match
+          case Some(Group.Single(f, _)) => groups(groups.size - 1) = Group.Single(f, to)
+          case _                        => groups += Group.Single(from, to)
+        i = next
+
+    /** The pipe for nodes `from..to` rebuilt over a fresh input port. */
+    def segmentPipe(from: Int, to: Int): Pipe[?] =
+      nodes(from - 1).tpe match
+        case '[t] => (from to to).foldLeft(SrcPort[t](0): Pipe[?])((cur, m) => replace(nodes(m), nodes(m - 1), cur))
+    def portOf(from: Int): Type[?] = if from == 1 then port else nodes(from - 1).tpe
+    def emit(p: Pipe[?]): Sink = p match { case q: Pipe[a] => EmitSink[a](q) }
+
+    val tiers = collection.mutable.ArrayBuffer.empty[Expr[Tier]]
+    sink match
+      case fs: FoldSink[a, s] =>
+        given Type[s] = fs.tpe
+        def foldOver(p: Pipe[?]): Sink =
+          FoldSink[a, s](p.asInstanceOf[Pipe[a]], fs.z, fs.op, fs.associative, fs.combine)(using fs.tpe)
+        val (init, last) = (groups.dropRight(1), groups.lastOption)
+        init.foreach(g => tiers += tierOf(g, segmentPipe, portOf, emit))
+        last match
+          case Some(Group.Repl(f, t)) if fs.combine.isDefined =>
+            tiers += '{ Tier.PartialFold(${ factory(foldOver(segmentPipe(f, t)), portOf(f)) }, ${ combine[s](fs.combine.get) }) }
+          case Some(Group.Repl(f, t)) =>
+            tiers += tierOf(Group.Repl(f, t), segmentPipe, portOf, emit)
+            tiers += '{ Tier.Single(${ factory(foldOver(segmentPipe(n, n - 1)), portOf(n)) }) }
+          case Some(Group.Single(f, t)) =>
+            tiers += '{ Tier.Single(${ factory(foldOver(segmentPipe(f, t)), portOf(f)) }) }
+          case None =>
+            if fs.combine.isDefined then
+              tiers += '{ Tier.PartialFold(${ factory(foldOver(nodes(0)), port) }, ${ combine[s](fs.combine.get) }) }
+            else tiers += '{ Tier.Single(${ factory(foldOver(nodes(0)), port) }) }
+      case _: EmitSink[?] =>
+        if groups.isEmpty then tiers += '{ Tier.Single(${ factory(emit(nodes(0)), port) }) }
+        else groups.foreach(g => tiers += tierOf(g, segmentPipe, portOf, emit))
+    tiers.toList
+
+  private def tierOf(g: Group, pipe: (Int, Int) => Pipe[?], portOf: Int => Type[?], emit: Pipe[?] => Sink)(
+      using Quotes): Expr[Tier] = g match
+    case Group.Repl(f, t)   => '{ Tier.Replicated(${ factory(emit(pipe(f, t)), portOf(f)) }) }
+    case Group.Single(f, t) => '{ Tier.Single(${ factory(emit(pipe(f, t)), portOf(f)) }) }
 
   private def combine[S: Type](c: Fn2[S, S, S])(using Quotes): Expr[(Any, Any) => Any] =
     '{ (x: Any, y: Any) => (${ c('{ x.asInstanceOf[S] }, '{ y.asInstanceOf[S] }) }: Any) }

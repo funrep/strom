@@ -4,8 +4,7 @@ ThisBuild / organization := "io.github.funrep"
 ThisBuild / homepage     := Some(url("https://github.com/funrep/strom"))
 ThisBuild / scmInfo      := Some(ScmInfo(url("https://github.com/funrep/strom"), "scm:git@github.com:funrep/strom.git"))
 ThisBuild / developers   := List(Developer("funrep", "Karl-Oskar Rikås", "2212965+funrep@users.noreply.github.com", url("https://github.com/funrep")))
-// TODO before the first release: choose a license, e.g.
-// ThisBuild / licenses := List("Apache-2.0" -> url("https://www.apache.org/licenses/LICENSE-2.0"))
+ThisBuild / licenses     := List("MIT" -> url("https://opensource.org/licenses/MIT"))
 ThisBuild / scalacOptions ++= Seq("-deprecation", "-feature", "-unchecked")
 
 lazy val root = (project in file("."))

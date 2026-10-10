@@ -39,8 +39,7 @@ libraryDependencies += "io.github.funrep" %% "strom-fs2" % "<version printed by 
 ```
 
 Scala 3.9, JDK 21+. CI runs `sbt test` on every push (`.github/workflows/ci.yml`); pushing a tag
-`vX.Y.Z` publishes to Maven Central (`release.yml`, once a license and the Sonatype/PGP secrets
-are configured).
+`vX.Y.Z` publishes to Maven Central (`release.yml`, once the Sonatype/PGP secrets are configured).
 
 ## Guarantees
 
@@ -230,3 +229,7 @@ The adapters allocate per chunk or per step, never per element.
 * `zip` and `zipWithIndex` allocate a tuple per element; use `zipWith` on the hot path.
 * `collect` is staged as a `match` only for partial-function literals; others go through
   `isDefinedAt` / `apply`.
+
+## License
+
+MIT, see [LICENSE](LICENSE).

@@ -26,6 +26,22 @@ Strom.showCode(...)   // the generated code, as a compile-time string
 Strom.explain(...)    // stage metadata and the Kiselyov IR shape
 ```
 
+## Install
+
+Not on Maven Central yet. Build it locally:
+
+```
+sbt publishLocal
+```
+
+```scala
+libraryDependencies += "io.github.funrep" %% "strom-fs2" % "<version printed by publishLocal>" // or strom-zio, strom-loom, strom-core
+```
+
+Scala 3.9, JDK 21+. CI runs `sbt test` on every push (`.github/workflows/ci.yml`); pushing a tag
+`vX.Y.Z` publishes to Maven Central (`release.yml`, once a license and the Sonatype/PGP secrets
+are configured).
+
 ## Guarantees
 
 * **Nothing is allocated per element on the fused path.** User lambdas are beta-reduced into

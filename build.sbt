@@ -1,6 +1,11 @@
 ThisBuild / scalaVersion := "3.9.0"
-ThisBuild / organization := "dev.strom"
-ThisBuild / version      := "0.1.0-SNAPSHOT"
+ThisBuild / organization := "io.github.funrep"
+// Versions come from git tags (sbt-dynver, via sbt-ci-release): tag `v0.1.0` to release 0.1.0.
+ThisBuild / homepage     := Some(url("https://github.com/funrep/strom"))
+ThisBuild / scmInfo      := Some(ScmInfo(url("https://github.com/funrep/strom"), "scm:git@github.com:funrep/strom.git"))
+ThisBuild / developers   := List(Developer("funrep", "Karl-Oskar Rikås", "2212965+funrep@users.noreply.github.com", url("https://github.com/funrep")))
+// TODO before the first release: choose a license, e.g.
+// ThisBuild / licenses := List("Apache-2.0" -> url("https://www.apache.org/licenses/LICENSE-2.0"))
 ThisBuild / scalacOptions ++= Seq("-deprecation", "-feature", "-unchecked")
 
 lazy val root = (project in file("."))

@@ -12,7 +12,7 @@ private[fs2] object FusedMacro:
   def plan(stream: Expr[Any])(using Quotes): Expr[String] =
     val f = Fs2Fuser()
     f.fuse(stream)
-    Expr(f.log.mkString("\n"))
+    Expr(f.summary)
 
 /** fs2 operators: `map`, `filter`, `take`, `fold`, `flatMap` (onto `Stream.range`), `zipWith`. */
 private[fs2] final class Fs2Fuser(using Quotes) extends ChainFuser:

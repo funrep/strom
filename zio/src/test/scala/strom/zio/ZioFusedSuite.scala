@@ -35,5 +35,5 @@ class ZioFusedSuite extends munit.FunSuite:
   test("fusion actually happens") {
     def s: ZStream[Any, Nothing, Int] = ZStream.empty
     assertEquals(StromZio.fusedPlan(s.map(_ + 1).filter(_ > 0).mapZIO(x => ZIO.succeed(x)).map(_ * 2).take(9)),
-      "fused: map → filter (1 inputs)\nfused: map → take (1 inputs)")
+      "fused: map → filter (1 inputs)\nfused: map → take (1 inputs)\nkept: mapZIO")
   }

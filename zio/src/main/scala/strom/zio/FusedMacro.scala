@@ -14,7 +14,7 @@ private[zio] object FusedMacro:
   def plan(stream: Expr[Any])(using Quotes): Expr[String] =
     val f = ZioFuser()
     f.fuse(stream)
-    Expr(f.log.mkString("\n"))
+    Expr(f.summary)
 
 /** ZStream operators: `map`, `filter`, `take`, `flatMap` (onto `ZStream.range`). One input per run. */
 private[zio] final class ZioFuser(using Quotes) extends ChainFuser:

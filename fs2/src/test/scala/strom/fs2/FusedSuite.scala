@@ -54,8 +54,8 @@ class FusedSuite extends munit.FunSuite:
   test("fusion actually happens") {
     def s: Stream[IO, Int] = Stream.empty
     val plan = StromFs2.fusedPlan(s.map(_ + 1).filter(_ > 0).evalMap(x => IO(x)).map(_ * 2).filter(_ < 9).fold(0)(_ + _))
-    assertEquals(plan, "fused: map → filter (1 inputs)\nfused: map → filter → fold (1 inputs)")
+    assertEquals(plan, "fused: map → filter (1 inputs)\nfused: map → filter → fold (1 inputs)\nkept: evalMap")
     assertEquals(StromFs2.fusedPlan(Stream.range(0, 9).map(_ + 1).take(3L)), "fused: map → take (0 inputs), never cedes")
     // A lone map is not worth a segment boundary.
-    assertEquals(StromFs2.fusedPlan(s.map(_ + 1).evalMap(x => IO(x))), "")
+    assertEquals(StromFs2.fusedPlan(s.map(_ + 1).evalMap(x => IO(x))), "kept: evalMap")
   }

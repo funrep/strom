@@ -40,6 +40,11 @@ abstract class ChainFuser(using val q: Quotes):
   private val front = Frontend()
   /** One line per fused run. */
   val log = collection.mutable.ArrayBuffer.empty[String]
+  /** Operators that were kept as written (not fusable), in order of appearance. */
+  val kept = collection.mutable.ArrayBuffer.empty[String]
+
+  /** `log`, plus a `kept:` line listing the operators left unfused (for `fusedPlan`). */
+  def summary: String = (log ++ (if kept.isEmpty then Nil else List(s"kept: ${kept.mkString(", ")}"))).mkString("\n")
 
   protected def strip(t: Term): Term = t match
     case Inlined(_, Nil, e) => strip(e)
@@ -60,14 +65,53 @@ abstract class ChainFuser(using val q: Quotes):
       case _                  => None
     go(t, Nil, Nil)
 
-  /** The source of a receiver chain and the calls applied to it, innermost first. */
+  /** The source of a receiver chain and the calls applied to it, innermost first. Besides
+   *  `stream.op(..)`, receivers reached through an implicit conversion (`ops(stream).op(..)`,
+   *  e.g. cats syntax) or an extension method (`op(stream)(..)`) are followed too; such calls
+   *  are always kept as written. */
   protected def chain(t0: Term): (Term, List[Call]) =
     val t = strip(t0)
-    asCall(t) match
-      case Some(c) if isStream(c.qual.tpe) && isStream(t.tpe) =>
+    if !isStream(t.tpe) then (t, Nil)
+    else asCall(t) match
+      case Some(c) if isStream(c.qual.tpe) =>
         val (src, calls) = chain(c.qual)
         (src, calls :+ c.copy(qual = strip(c.qual)))
-      case _ => (t, Nil)
+      case Some(c) =>
+        indirectReceiver(t) match
+          case Some((recv, _)) =>
+            val (src, calls) = chain(recv)
+            (src, calls :+ c.copy(qual = strip(recv), name = c.name + "*"))
+          case None => (t, Nil)
+      case None => (t, Nil)
+
+  /** For `conv(stream).op(..)` or `op(stream)(..)`: the stream, and how to rebuild with another. */
+  private def indirectReceiver(t: Term): Option[(Term, Term => Term)] =
+    def viaConversion(x: Term): Option[(Term, Term => Term)] = x match
+      case Apply(fn, as)     => viaConversion(fn).map((r, rb) => (r, (n: Term) => Apply.copy(x)(rb(n), as)))
+      case TypeApply(fn, ts) => viaConversion(fn).map((r, rb) => (r, (n: Term) => TypeApply.copy(x)(rb(n), ts)))
+      case Select(q, name) => conversionArg(strip(q)).map((r, rb) => (r, (n: Term) => Select.copy(x)(rb(n), name)))
+      case _ => None
+    // conv(stream)(using instances…)
+    def conversionArg(c: Term): Option[(Term, Term => Term)] = c match
+      case Apply(f, List(arg)) if isStream(arg.tpe) => Some((arg, (n: Term) => Apply.copy(c)(f, List(n))))
+      case Apply(f, as)     => conversionArg(f).map((r, rb) => (r, (n: Term) => Apply.copy(c)(rb(n), as)))
+      case TypeApply(f, ts) => conversionArg(f).map((r, rb) => (r, (n: Term) => TypeApply.copy(c)(rb(n), ts)))
+      case _ => None
+    def viaExtension(x: Term): Option[(Term, Term => Term)] = x match
+      case Apply(fn, as) =>
+        viaExtension(fn).map((r, rb) => (r, (n: Term) => Apply.copy(x)(rb(n), as))).orElse {
+          // the innermost argument list holding a single stream: the extension receiver
+          as match
+            case List(arg) if isStream(arg.tpe) && innermost(fn) => Some((arg, (n: Term) => Apply.copy(x)(fn, List(n))))
+            case _ => None
+        }
+      case TypeApply(fn, ts) => viaExtension(fn).map((r, rb) => (r, (n: Term) => TypeApply.copy(x)(rb(n), ts)))
+      case _ => None
+    def innermost(fn: Term): Boolean = fn match
+      case TypeApply(f, _) => innermost(f)
+      case _: Ident | _: Select => true
+      case _ => false
+    viaConversion(t).orElse(viaExtension(t))
 
   protected def lambda1(t: Term): Option[(Symbol, Term)] = strip(t) match
     case Lambda(List(p), body) => Some((p.symbol, body))
@@ -81,7 +125,7 @@ abstract class ChainFuser(using val q: Quotes):
       case _ => true
     })
 
-  private def op(c: Call): Option[PureOp] = pureOp(c).filter {
+  private def op(c: Call): Option[PureOp] = (if c.name.endsWith("*") then None else pureOp(c)).filter {
     case PureOp.FlatMap(f) => lambda1(f).exists((_, body) => pureInner(body))
     case _ => true
   }
@@ -131,6 +175,7 @@ abstract class ChainFuser(using val q: Quotes):
           add(r, c, o)
           if o.isInstanceOf[PureOp.Fold] then flush()
         case _ =>
+          kept += c.name.stripSuffix("*")
           flush()
           current = rebuild(c.term, current)
     flush()
@@ -169,8 +214,14 @@ abstract class ChainFuser(using val q: Quotes):
     r.pipe
 
   /** The original call with a new receiver. */
-  protected def rebuild(t: Term, newQual: Term): Term = t match
-    case Apply(fn, as)     => Apply.copy(t)(rebuild(fn, newQual), as)
-    case TypeApply(fn, ts) => TypeApply.copy(t)(rebuild(fn, newQual), ts)
+  protected def rebuild(t: Term, newQual: Term): Term =
+    asCall(t) match
+      case Some(c) if !isStream(c.qual.tpe) =>
+        indirectReceiver(t).map((_, rb) => rb(newQual)).getOrElse(report.errorAndAbort(s"strom: cannot rebuild ${t.show}"))
+      case _ => rebuildDirect(t, newQual)
+
+  private def rebuildDirect(t: Term, newQual: Term): Term = t match
+    case Apply(fn, as)     => Apply.copy(t)(rebuildDirect(fn, newQual), as)
+    case TypeApply(fn, ts) => TypeApply.copy(t)(rebuildDirect(fn, newQual), ts)
     case Select(_, name)   => Select.copy(t)(newQual, name)
     case _                 => report.errorAndAbort(s"strom: cannot rebuild ${t.show}")

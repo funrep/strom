@@ -1,5 +1,6 @@
 package strom.fs2
 
+import strom.runtime.Segment
 import scala.quoted.*
 import scala.reflect.ClassTag
 import strom.internal.{ChainFuser, Codegen, Pipe}
@@ -75,7 +76,7 @@ private[fs2] final class Fs2Fuser(using Quotes) extends ChainFuser:
     if !cedes then log(log.size - 1) += ", never cedes"
     if verbose then report.info(s"strom: ${log.last}", last.pos)
     Select.unique(Ref(Symbol.requiredModule("strom.fs2.StromFs2")), "fusedRun").appliedToTypes(List(fRepr, bRepr))
-      .appliedToArgs(List(factory.asTerm, inputs.asTerm, tags.asTerm, cede, Literal(IntConstant(1024)), Literal(IntConstant(4096))))
+      .appliedToArgs(List(factory.asTerm, inputs.asTerm, tags.asTerm, cede, Literal(IntConstant(strom.runtime.Segment.DefaultMaxOut)), Literal(IntConstant(strom.runtime.Segment.DefaultBudget))))
 
   private def classTag(t: TypeRepr): Expr[ClassTag[?]] = t.asType match
     case '[a] => Expr.summon[ClassTag[a]].getOrElse(report.errorAndAbort(s"strom: no ClassTag for ${t.show}"))

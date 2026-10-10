@@ -3,7 +3,7 @@ package strom.zio
 import scala.reflect.ClassTag
 import _root_.zio.{Chunk, Trace, ZIO}
 import _root_.zio.stream.{ZChannel, ZPipeline, ZStream}
-import strom.runtime.{Runner, SegmentFactory}
+import strom.runtime.{Runner, Segment, SegmentFactory}
 
 /** Runs compiled one-input Ström segments as ZIO stream pipelines.
  *
@@ -12,17 +12,17 @@ import strom.runtime.{Runner, SegmentFactory}
  *  step uses up its work budget the channel runs `ZIO.yieldNow`. */
 object StromZio:
 
-  def pipeline[A: ClassTag, B](f: SegmentFactory[B], maxOut: Int = 1024, budget: Int = 4096)(
+  def pipeline[A: ClassTag, B](f: SegmentFactory[B], maxOut: Int = Segment.DefaultMaxOut, budget: Int = Segment.DefaultBudget)(
       using Trace): ZPipeline[Any, Nothing, A, B] =
     require(f.numInputs == 1 && !f.isFold, "pipeline expects a one-input emitting segment")
     ZPipeline.fromChannel(channel[A, B](f, maxOut, budget))
 
   /** A one-input fold: the stream's single element is the result. */
-  def fold[A: ClassTag, R](f: SegmentFactory[R], budget: Int = 4096)(using Trace): ZPipeline[Any, Nothing, A, R] =
+  def fold[A: ClassTag, R](f: SegmentFactory[R], budget: Int = Segment.DefaultBudget)(using Trace): ZPipeline[Any, Nothing, A, R] =
     require(f.numInputs == 1 && f.isFold, "fold expects a one-input fold segment")
     ZPipeline.fromChannel(channel[A, R](f, 1, budget))
 
-  def runFold[Rq, E, A: ClassTag, R](f: SegmentFactory[R], budget: Int = 4096)(s: ZStream[Rq, E, A])(
+  def runFold[Rq, E, A: ClassTag, R](f: SegmentFactory[R], budget: Int = Segment.DefaultBudget)(s: ZStream[Rq, E, A])(
       using Trace): ZIO[Rq, E, R] =
     s.via(fold[A, R](f, budget)).runHead.map(_.get)
 

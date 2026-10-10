@@ -164,9 +164,9 @@ Throughput, ns per element / bytes allocated per element:
 | hand-written `while` | 4.6 / 0 | — |
 | `Strom.run` (direct) | 4.7 / 0 | 3.3 / 0 |
 | segment + raw runner | 5.1 / 0 | 4.1 / 0 |
-| segment via ZIO adapter | 5.8 / 4.4 | — |
-| segment via fs2 adapter | 6.5 / 2.2 | 7.8 / 25 |
-| **plain fs2 code in `StromFs2.fused`** | **6.6 / 2.1** | **7.8 / 36** |
+| segment via ZIO adapter | 5.7 / 4.3 | — |
+| segment via fs2 adapter | 5.9 / 1.4 | 7.4 / 23 |
+| **plain fs2 code in `StromFs2.fused`** | **6.2 / 1.4** | **8.3 / 36** |
 | plain fs2 | 52 / 108 | 825 / 3269 |
 | plain ZStream | 31 / 147 | 641 / 1519 |
 | Scala iterator | 74 / 80 | — |
@@ -184,11 +184,16 @@ pipelines on the cats-effect runtime (`sbt "bench/runMain strom.bench.Latency"`)
 
 | load | timer lateness p50 | p99 |
 |---|---|---|
-| none | 0.29 ms | 0.45 ms |
-| segments, budget 4096 (cede) | 0.17 ms | 22.5 ms |
-| segments, budget `Int.MaxValue` | 514 ms | 2.8 s |
-| direct fused loop in one `IO.delay` | starved (1 tick in 125 s) | |
-| segments on a dedicated pool (`evalOn`) | 0.27 ms | 0.36 ms |
+| none | 0.52 ms | 0.63 ms |
+| segments, default (`cede` once per 100 µs slice) | 0.13 ms | 2.9 ms |
+| segments, budget `Int.MaxValue` (never yield) | 1.4 s | 2.8 s |
+| direct fused loop in one `IO.delay` | starved (≈ 2 ticks in 110 s) | |
+| segments on a dedicated pool (`evalOn`) | 0.53 ms | 1.7 ms |
+
+A segment returns to its runner every `budget` steps (default 1024); the runner yields to the
+scheduler only once per time slice (default 100 µs), because a `cede` costs microseconds. With the
+slice, adapter throughput is unchanged (fs2 cheap stages: 5.9 ns/elem) while the timer's p99
+stays ≈ 3 ms on a fully loaded machine.
 
 The adapters allocate per chunk or per step, never per element.
 

@@ -1,7 +1,7 @@
 package strom.loom
 
 import java.util.concurrent.BlockingQueue
-import strom.runtime.{Runner, SegmentFactory}
+import strom.runtime.{Runner, Segment, SegmentFactory}
 
 /** Runs compiled Ström segments on (virtual) threads, connected by blocking queues.
  *
@@ -20,7 +20,7 @@ object StromLoom:
   /** Drives `f` on the current thread until done. Inputs and output are queues of [[Msg]].
    *  Throws `InterruptedException` if the thread is interrupted; forwards upstream failures. */
   def run[O](f: SegmentFactory[O], inputs: IndexedSeq[BlockingQueue[Msg]], output: BlockingQueue[Msg],
-             maxOut: Int = 1024, budget: Int = 4096): Unit =
+             maxOut: Int = Segment.DefaultMaxOut, budget: Int = Segment.DefaultBudget): Unit =
     require(inputs.size == f.numInputs, s"segment expects ${f.numInputs} inputs, got ${inputs.size}")
     val runner = Runner(f, maxOut, budget)
     try
@@ -53,7 +53,7 @@ object StromLoom:
 
   /** Starts [[run]] on a new virtual thread. */
   def start[O](f: SegmentFactory[O], inputs: IndexedSeq[BlockingQueue[Msg]], output: BlockingQueue[Msg],
-               maxOut: Int = 1024, budget: Int = 4096): Thread =
+               maxOut: Int = Segment.DefaultMaxOut, budget: Int = Segment.DefaultBudget): Thread =
     Thread.ofVirtual().name("strom-segment").start(() =>
       try run(f, inputs, output, maxOut, budget)
       catch case _: InterruptedException => ()

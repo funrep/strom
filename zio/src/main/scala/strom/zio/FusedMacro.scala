@@ -1,5 +1,6 @@
 package strom.zio
 
+import strom.runtime.Segment
 import scala.quoted.*
 import scala.reflect.ClassTag
 import _root_.zio.Trace
@@ -62,7 +63,7 @@ private[zio] final class ZioFuser(using Quotes) extends ChainFuser:
     val tags = '{ Vector[ClassTag[?]](${ Varargs(r.inputs.map((_, t) => classTag(t))) }*) }
     val trace = Expr.summon[Trace].getOrElse(report.errorAndAbort("strom: no zio.Trace"))
     val call = Select.unique(Ref(Symbol.requiredModule("strom.zio.StromZio")), "fusedRun").appliedToTypes(List(rT, eT, bT))
-      .appliedToArgs(List(factory.asTerm, inputs.asTerm, tags.asTerm, Literal(IntConstant(1024)), Literal(IntConstant(4096))))
+      .appliedToArgs(List(factory.asTerm, inputs.asTerm, tags.asTerm, Literal(IntConstant(strom.runtime.Segment.DefaultMaxOut)), Literal(IntConstant(strom.runtime.Segment.DefaultBudget))))
       .appliedToArgs(List(trace.asTerm))
     Typed(call, Inferred(last.tpe))
 

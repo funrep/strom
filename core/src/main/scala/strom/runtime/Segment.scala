@@ -111,6 +111,13 @@ abstract class Segment(val numInputs: Int, val maxOut: Int, val budget: Int) ext
 
 object Segment:
   final val MaxPorts = 4
+  /** Default output buffer size. */
+  final val DefaultMaxOut = 1024
+  /** Default work budget per step: how often a running segment returns to its driver. */
+  final val DefaultBudget = 1024
+  /** Default time slice: how long a runner keeps stepping before it reports `Yield` (see
+   *  `Runner`). Short enough for timely I/O, long enough that yielding costs ≈ 1–2% of throughput. */
+  final val DefaultSliceNanos = 100_000L
 
   /** Status codes returned by [[Segment.step]]. Non-negative codes mean "need input on port n". */
   object Status:
@@ -134,7 +141,7 @@ final class SegmentFactory[Out](
     val plan: PlanInfo,
     mk: (Int, Int) => Segment,
 ):
-  def create(maxOut: Int = 1024, budget: Int = 4096): Segment = mk(maxOut, budget)
+  def create(maxOut: Int = Segment.DefaultMaxOut, budget: Int = Segment.DefaultBudget): Segment = mk(maxOut, budget)
   override def toString = s"SegmentFactory(inputs=$numInputs, fold=$isFold, $plan)"
 
 /** Base for one-shot direct pipelines that were too large for a single JIT-able method and

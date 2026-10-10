@@ -35,10 +35,18 @@ class RunnerSuite extends munit.FunSuite:
 
   test("runner reports Yield on budget exhaustion and the fold result on Done") {
     val f = Strom.foldSegment((a: Strom[Int]) => a.flatMap(x => Strom.range(0, x)).filter(_ % 1000 == 0).count)
-    val run = Runner(f, budget = 100)
+    val run = Runner(f, budget = 100, sliceNanos = 0) // yield at every budget boundary
     val (_, yields) = driveAll(run, Vector(Array(100_000)), 1)
     assertEquals(run.result, 100L)
     assert(yields >= 999)
+  }
+
+  test("with a time slice, yields are rare") {
+    val f = Strom.foldSegment((a: Strom[Int]) => a.flatMap(x => Strom.range(0, x)).filter(_ % 1000 == 0).count)
+    val run = Runner(f, budget = 100, sliceNanos = 10_000_000_000L) // 10 s: effectively never
+    val (_, yields) = driveAll(run, Vector(Array(100_000)), 1)
+    assertEquals(run.result, 100L)
+    assertEquals(yields, 0)
   }
 
   test("NeedInput signals are preallocated") {

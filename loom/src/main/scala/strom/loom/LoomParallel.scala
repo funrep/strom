@@ -15,8 +15,8 @@ object LoomParallel:
   final case class Config(
       parallelism: Int = Runtime.getRuntime.availableProcessors(),
       queueCapacity: Int = 16,
-      maxOut: Int = 1024,
-      budget: Int = 4096,
+      maxOut: Int = Segment.DefaultMaxOut,
+      budget: Int = Segment.DefaultBudget,
       compute: ThreadFactory = Thread.ofVirtual().name("strom-worker-", 0).factory(),
   ):
     require(parallelism > 0 && queueCapacity > 0)
@@ -45,9 +45,12 @@ object LoomParallel:
     }
     Running(tiers)
 
-  private def onYield(): Unit =
-    if Thread.interrupted() then throw InterruptedException()
-    Thread.`yield`()
+  /** Per worker: honour interrupts at every budget boundary, give way once per time slice. */
+  private def yielder(): () => Unit =
+    val slice = TimeSlice(Segment.DefaultSliceNanos)
+    () =>
+      if Thread.interrupted() then throw InterruptedException()
+      if slice.due() then Thread.`yield`()
 
   private def spawn(f: ThreadFactory)(body: => Unit): Thread =
     val t = f.newThread(() =>
@@ -63,12 +66,12 @@ object LoomParallel:
     case Tier.Single(f) =>
       Seq(spawn(cfg.compute)(StromLoom.run(f, Vector(in), out, cfg.maxOut, cfg.budget)))
     case Tier.Replicated(f) =>
-      ordered(in, out, cfg, f, (seg, c) => Chunks.processStateless(seg, c, () => onYield()),
+      ordered(in, out, cfg, f, (seg, c, y) => Chunks.processStateless(seg, c, y),
         (acc, r) => { val c = r.asInstanceOf[ArrayChunk]; if c.length > 0 then out.put(Data(c.array, c.offset, c.length)); acc },
         _ => ())
     case Tier.PartialFold(f, combine) =>
       var any = false
-      ordered(in, out, cfg, f, (seg, c) => Chunks.partialFold(seg, c, () => onYield()),
+      ordered(in, out, cfg, f, (seg, c, y) => Chunks.partialFold(seg, c, y),
         (acc, r) => { val v = if any then combine(acc, r) else r; any = true; v },
         acc => {
           val res = if any then acc else Chunks.end(f.create(cfg.maxOut, cfg.budget))._2
@@ -88,7 +91,7 @@ object LoomParallel:
   /** Chunks go round-robin to N workers; results are released in input order through a
    *  [[ReorderBuffer]] whose window is enforced by a semaphore on the reader. */
   private def ordered(in: BlockingQueue[Msg], out: BlockingQueue[Msg], cfg: Config, f: SegmentFactory[?],
-                      work: (Segment, ArrayChunk) => Any, deliver: (Any, Any) => Any, finish: Any => Unit): Seq[Thread] =
+                      work: (Segment, ArrayChunk, () => Unit) => Any, deliver: (Any, Any) => Any, finish: Any => Unit): Seq[Thread] =
     val n = cfg.parallelism
     val window = 2 * n + cfg.queueCapacity
     val permits = Semaphore(window)
@@ -97,10 +100,11 @@ object LoomParallel:
     val workers = (0 until n).map { w =>
       spawn(cfg.compute) {
         val seg = f.create(cfg.maxOut, cfg.budget)
+        val onYield = yielder()
         while true do
           val (seq, chunk) = jobs(w).take()
           if seq < 0 then throw InterruptedException() // stop
-          try events.put(Done(seq, work(seg, chunk)))
+          try events.put(Done(seq, work(seg, chunk, onYield)))
           catch
             case e: InterruptedException => throw e
             case e: Throwable => events.put(Fail(e)); throw InterruptedException()
@@ -165,14 +169,15 @@ object LoomParallel:
     val workers = (0 until n).map { p =>
       spawn(cfg.compute) {
         val seg = f.create(cfg.maxOut, cfg.budget)
+        val onYield = yielder()
         def emit(c: ArrayChunk): Unit = if c.length > 0 then out.put(Data(c.array, c.offset, c.length))
         try
           var running = true
           while running do
             queues(p).take() match
-              case d: Data => emit(Chunks.feed(seg, chunkOf(d), () => onYield())._1)
+              case d: Data => emit(Chunks.feed(seg, chunkOf(d), onYield)._1)
               case End =>
-                val (last, res) = Chunks.end(seg, () => onYield())
+                val (last, res) = Chunks.end(seg, onYield)
                 emit(last)
                 if seg.isFold then out.put(Result(res))
                 running = false

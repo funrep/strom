@@ -1,0 +1,203 @@
+# Ström
+
+Guaranteed, allocation-free stream fusion for Scala 3, by staging (quotes), after Kiselyov,
+Biboudis, Palladinos and Smaragdakis, *Stream Fusion, to Completeness* (POPL 2017).
+
+A pipeline written with the `Strom` DSL is compiled **at compile time** into loops: either one
+fused loop over arrays (`Strom.run`) or a **resumable, chunk-driven segment** that a
+runtime-agnostic, sans-I/O runner drives one bounded step at a time.
+
+```scala
+import strom.Strom
+
+// Direct: one fused loop, no allocation at all.
+val r: Int = Strom.run {
+  Strom.fromArray(a).flatMap(x => Strom.range(0, x))
+    .zipWith(Strom.fromArray(b).filter(_ % 2 == 0))(_ * _)
+    .take(n).sum
+}
+
+// Resumable segment with two input ports, driven by fs2:
+val seg = Strom.foldSegment2((a: Strom[Int], b: Strom[Int]) =>
+  a.flatMap(x => Strom.range(0, x)).zipWith(b.filter(_ % 2 == 0))(_ * _).take(n).sum)
+val out: Stream[IO, Int] = StromFs2.fold2[IO, Int, Int, Int](seg)(as, bs)
+
+Strom.showCode(...)   // the generated code, as a compile-time string
+Strom.explain(...)    // stage metadata and the Kiselyov IR shape
+```
+
+## Guarantees
+
+* **Nothing is allocated per element on the fused path.** User lambdas are beta-reduced into
+  the loop body (no closures, no `Function1.apply`, no boxing); element types are specialised
+  from `Type[A]` (primitive locals, primitive slot fields, primitive I/O arrays); there are no
+  intermediate chunks. `AllocationSuite` measures this with the JVM's per-thread allocation
+  counter. A segment run over 2M input elements allocates < 4 KB in total (the instance and
+  one boxed result). A direct run allocates nothing.
+* **Segments are synchronous, effect-free and thread-confined.** `step()` does at most `budget`
+  producer steps and emits at most `maxOut` elements, then returns a status: `NeedInput(port)`,
+  `Emit`, `Yield` or `Done`. Suspension only happens before an element is consumed or after
+  it has been saved in state, so re-entering continues exactly where the step stopped.
+* **A failing step poisons the instance**: every later `step()` rethrows.
+* **`strom-core` has no dependencies** beyond the Scala 3 library. Runtime-specific code lives in
+  adapter modules: `strom-fs2` (Pull + StepLeg, `cede`, `Chunk.array`), `strom-zio`
+  (`ZChannel.readWithCause`, `yieldNow`, `Chunk.fromArray`) and `strom-loom` (virtual threads,
+  blocking queues, `Thread.interrupted()` polling, `Thread.yield()` on budget exhaustion).
+
+## How it works
+
+| Layer | File | What |
+|---|---|---|
+| DSL | `Strom.scala` | Ordinary immutable trees (so the reference interpreter can run them); the staged entry points are macros that read the *source* of the expression. |
+| Frontend | `internal/Frontend.scala` | Quoted patterns → `Pipe` IR. Lambdas are substituted (beta-reduced) and ports are lambda parameters. |
+| Logical IR | `internal/Pipe.scala` | Ops plus static metadata: stateless / cardinality / associativity (for the parallel planner). |
+| Kiselyov IR | `internal/Stream.scala` | `Producer = For(upb, index) \| Unfold(term, card, step)` with CPS `init`; `Stream = Linear \| Nested`. |
+| Codegen | `internal/Gen.scala` | `map / filter / flatMap / take / zipWith / windowFold`, let-insertion, `take` pushed into every loop, two backends (below), method splitting. |
+| Runtime | `runtime/Segment.scala`, `Slots.scala`, `Runner.scala` | Segment base class (ports, output buffer, status codes, poisoning), slot fields, sans-I/O runner, key partitioner, reorder buffer, in-flight accounting. |
+
+Two backends share the IR:
+
+* **`nest`** is Kiselyov's `fold_raw`: properly nested `while` loops over hoisted locals. Used
+  for direct pipelines.
+* **`flags`** is `make_linear` generalised. Every nesting level has an `active` flag, and all
+  state lives in storage (hoisted locals, or **slot fields** of the segment: "locals →
+  fields"), so the loop nest can be left at any element boundary and re-entered from the top.
+  It is used for zip/window operands (pulls) and for every loop of a resumable segment.
+
+Zip picks the cheapest correct strategy: a shared index for two indexed producers, lock-step
+stepping for two exactly-one producers (stepping the suspendable one first), push-linear when
+one side yields exactly one element per step, and pulls on both sides otherwise.
+
+**Method splitting.** HotSpot does not JIT-compile methods over 8000 bytes of bytecode. The
+generator measures its output (≈1 byte of bytecode per tree node, calibrated against class
+files) and, when the estimate exceeds 6000 bytes, regenerates with the largest regions
+outlined into local `def`s. The compiler lifts these into separate methods, and `return`s
+inside them are retargeted. Direct pipelines that are too large switch to field storage on a
+one-shot frame, so that outlined code does not capture (and box) locals.
+
+## Fusing plain fs2 / ZIO code
+
+You don't have to rewrite anything in the `Strom` DSL. Wrap an ordinary stream expression:
+
+```scala
+StromFs2.fused {
+  in.map(_ * 3).filter(_ % 2 == 0).evalMap(save).map(_ + 1).take(100L).fold(0)(_ + _)
+}
+StromZio.fused { in.map(f).filter(p).mapZIO(save).map(g) }
+```
+
+Each maximal run of pure operators becomes one compiled segment. Everything else (effects,
+time, concurrency, operators it doesn't know) is kept exactly as written, between the runs.
+`StromFs2.fusedPlan(…)` / `StromZio.fusedPlan(…)` return what was fused, as a compile-time string.
+
+| | fs2 | ZIO |
+|---|---|---|
+| fused operators | `map`, `filter`, `take`, `fold`, `zipWith`, `flatMap` onto `Stream.range` | `map`, `filter`, `take`, `flatMap` onto `ZStream.range` |
+| inputs per run | up to 4 (`zipWith`) | 1 |
+| yields to the scheduler | `cede` when a `Spawn[F]` exists (not for `Pure`) | `yieldNow` |
+
+A run must be worth a segment boundary: two or more operators, or a `flatMap`, `zipWith` or `fold`.
+The library-independent part lives in `strom.internal.ChainFuser`; each adapter only says
+which calls are pure operators and how to run a segment.
+
+## Parallel tier
+
+`Strom.parallel` / `parallelFold` / `parallelKeyed` compile a one-input pipeline into a
+`ParallelPlan`, using the static metadata (stateless / associative / cardinality):
+
+| Pipeline shape | Plan |
+|---|---|
+| only stateless ops (`map`, `filter`, `flatMap`) | `Replicated`: N instances, one chunk each, outputs reordered (`ReorderBuffer`) |
+| stateless ops + `sum` / `count` / `foldAssociative` (element = result type) | `PartialFold`: per-chunk folds combined in input order |
+| stateless prefix, then a stateful op (`take`, `zipWith`, `windowFold`, other folds) | `Replicated` prefix, then `Single`: the pipeline is cut at the first stateful op |
+| `parallelKeyed(key)(…)` | `Keyed`: one instance per partition; a staged partitioner (key function inlined, specialised to the element type) routes each chunk |
+
+Plans are pure data. The executors live in the adapters:
+
+* `LoomParallel.start(plan, in, out, Config(parallelism, queueCapacity, …, compute))`: tiers
+  connected by bounded queues. Coordination runs on virtual threads. Workers run on `compute`
+  (virtual by default; e.g. `Thread.ofPlatform().factory()` for a dedicated pool). A
+  semaphore-bounded window feeds an `InFlight` / `ReorderBuffer` pair, so memory stays bounded.
+  If a downstream tier finishes early, the upstream tiers are stopped.
+* `StromFs2.parallel(plan, parallelism, compute = Some(ec))`: `parEvalMap` (ordered) over a
+  pool of reusable instances. With `compute`, CPU work runs via `evalOn`. Keyed tiers use one
+  bounded `Channel` per partition and `parJoin`.
+
+The semantics are checked by `ParallelPlanSuite` (a sequential executor that still
+round-robins over several instances), `LoomParallelSuite` and `Fs2ParallelSuite` (random
+parallelism, queue sizes, budgets and thread kinds), all against the reference interpreter.
+
+## Verification
+
+* `SegmentSuite`, `DirectSuite`, `RunnerSuite`, `StromFs2Suite`: fixed pipelines (the
+  representative one, nested, zip of ports/ranges/pulls, windows, take everywhere, Long /
+  Double / Byte / String / tuple elements, closures inside lambdas) agree with `Reference`
+  for random inputs, **random chunkings** (including empty chunks and offsets), random output
+  capacities and random work budgets down to 1.
+* `StagedShapesSuite`: **random pipeline shapes**, compiled at test time with
+  `scala.quoted.staging` by the same generator, checked against the reference interpreter.
+  Default: 200 shapes × 40 runs. `STROM_SHAPE_BATCHES=80` gives 2000 shapes.
+* `GoldenSuite`: golden files of `Expr.show` (`STROM_UPDATE_GOLDEN=1` to update).
+* `MethodSizeSuite`: parses the compiled class files and asserts that no generated method
+  reaches 8000 bytes. It includes deliberately huge pipelines that must be split.
+* `SafetySuite`: poisoning, bounded work, bounded output, early termination.
+
+`sbt test` runs everything.
+
+Benchmarks (they load every core, so run them on an otherwise idle machine):
+
+* `sbt "bench/Jmh/run -prof gc strom.bench.CheapStages strom.bench.Representative"`: ns and bytes per element.
+* `sbt "bench/Jmh/run strom.bench.Scaling"`: 1/2/4/8-way replicated tier (loom and fs2) vs sequential.
+* `sbt "bench/runMain strom.bench.Latency"`: lateness of a 1 ms ticker fiber while every core
+  runs fused pipelines (with cede, without yields, direct loop, dedicated pool).
+* `sbt "bench/runMain strom.bench.check"`: all variants compute the same result.
+
+## Numbers (JMH, Apple M1 (4P+4E), JDK 23)
+
+Throughput, ns per element / bytes allocated per element:
+
+| | 7 cheap stages + sum | flatMap + zip + filter + take + sum |
+|---|---|---|
+| hand-written `while` | 4.6 / 0 | — |
+| `Strom.run` (direct) | 4.7 / 0 | 3.3 / 0 |
+| segment + raw runner | 5.1 / 0 | 4.1 / 0 |
+| segment via ZIO adapter | 5.8 / 4.4 | — |
+| segment via fs2 adapter | 6.5 / 2.2 | 7.8 / 25 |
+| **plain fs2 code in `StromFs2.fused`** | **6.6 / 2.1** | **7.8 / 36** |
+| plain fs2 | 52 / 108 | 825 / 3269 |
+| plain ZStream | 31 / 147 | 641 / 1519 |
+| Scala iterator | 74 / 80 | — |
+
+Scaling of a replicated tier (8 stages, ~20 ops per element), ns per element:
+
+| parallelism | 1 | 2 | 4 | 8 |
+|---|---|---|---|---|
+| loom executor | 8.0 | 4.1 | 2.2 | 1.9 |
+| fs2 executor | 8.3 | 4.7 | 2.9 | 2.8 |
+| sequential segment | 7.4 | | | |
+
+I/O latency under CPU load: a fiber sleeps 1 ms in a loop while 8 fibers (one per core) run fused
+pipelines on the cats-effect runtime (`sbt "bench/runMain strom.bench.Latency"`):
+
+| load | timer lateness p50 | p99 |
+|---|---|---|
+| none | 0.29 ms | 0.45 ms |
+| segments, budget 4096 (cede) | 0.17 ms | 22.5 ms |
+| segments, budget `Int.MaxValue` | 514 ms | 2.8 s |
+| direct fused loop in one `IO.delay` | starved (1 tick in 125 s) | |
+| segments on a dedicated pool (`evalOn`) | 0.27 ms | 0.36 ms |
+
+The adapters allocate per chunk or per step, never per element.
+
+## Limits (v1)
+
+* Parallel plans support one-input pipelines and make one cut (later stateless ops after the
+  cut run in the single tier). ZIO has no parallel executor yet.
+* Not fused (by design): fan-out (an input port is consumed once), effects inside segments,
+  dynamic pipeline shapes. Those stay at the runtime level, between segments.
+* `flatMap` needs a lambda literal whose body is a `Strom` expression. Other functions may be
+  non-literal (Ström then calls them through `Function.apply` and warns).
+* Pipelines must be written inline (directly, or via `inline def`).
+* At most 4 input ports; the state slot pool (96 Int / 32 Long / 32 Double / 16 Float /
+  96 Boolean / 48 reference slots) bounds pipeline size. Exceeding it is a compile error.
+* `zip` (tuples) allocates a tuple per element; use `zipWith` on the hot path.

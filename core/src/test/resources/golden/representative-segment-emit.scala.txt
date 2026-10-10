@@ -1,0 +1,81 @@
+// state slots: z0=have z1=ended i0=cur z2=active i1=x i2=from i3=len i4=i z3=have z4=ended i5=cur j0=nr
+((cap: scala.Int, budget0: scala.Int) => {
+  val seg: strom.runtime.Segment = {
+    final class $anon() extends strom.runtime.Segment(2, cap, budget0) {
+      def isFold: scala.Boolean = false
+      protected def stepImpl(): scala.Int = {
+        val in0: scala.Array[scala.Int] = $anon.this.in0.asInstanceOf[scala.Array[scala.Int]]
+        val in1: scala.Array[scala.Int] = $anon.this.in1.asInstanceOf[scala.Array[scala.Int]]
+        val out: scala.Array[scala.Int] = $anon.this.out.asInstanceOf[scala.Array[scala.Int]]
+        $anon.this.outLen = 0
+        if ($anon.this.finished) return -3 else ()
+        $anon.this.fuel = $anon.this.budget
+        if ($anon.this.started.unary_!) {
+          $anon.this.started = true
+          $anon.this.j0 = GoldenSuite.this.n.toLong
+          $anon.this.z0 = false
+          $anon.this.z1 = false
+          $anon.this.z2 = false
+          $anon.this.z3 = false
+          $anon.this.z4 = false
+        } else ()
+        while (true) if ($anon.this.j0.>(0L).&&($anon.this.z1.unary_!.&&($anon.this.z4.unary_!))) {
+          if ($anon.this.outLen.>=($anon.this.maxOut)) return -1 else ()
+          while ($anon.this.z0.unary_!.&&($anon.this.z1.unary_!)) if ($anon.this.z2) while ($anon.this.z0.unary_!.&&($anon.this.z1.unary_!).&&($anon.this.z2)) if ($anon.this.i4.<($anon.this.i3)) {
+            if ($anon.this.fuel.<=(0)) return -2 else ()
+            $anon.this.fuel = $anon.this.fuel.-(1)
+            val idx: scala.Int = $anon.this.i4
+            $anon.this.i4 = idx.+(1)
+            val y: scala.Int = $anon.this.i2.+(idx)
+            $anon.this.i0 = y
+            $anon.this.z0 = true
+          } else $anon.this.z2 = false else if ($anon.this.pos0.<($anon.this.end0).||($anon.this.ended0.unary_!)) {
+            if ($anon.this.fuel.<=(0)) return -2 else ()
+            $anon.this.fuel = $anon.this.fuel.-(1)
+            val p: scala.Int = $anon.this.pos0
+            if (p.>=($anon.this.end0)) return 0 else ()
+            $anon.this.pos0 = p.+(1)
+            val x: scala.Int = in0.apply(p)
+            $anon.this.i1 = x
+            $anon.this.i2 = 0
+            $anon.this.i3 = $anon.this.i1.-($anon.this.i2)
+            $anon.this.i4 = 0
+            $anon.this.z2 = true
+          } else $anon.this.z1 = true
+          if ($anon.this.z0) {
+            while ($anon.this.z3.unary_!.&&($anon.this.z4.unary_!)) if ($anon.this.pos1.<($anon.this.end1).||($anon.this.ended1.unary_!)) {
+              if ($anon.this.fuel.<=(0)) return -2 else ()
+              $anon.this.fuel = $anon.this.fuel.-(1)
+              val `p₂`: scala.Int = $anon.this.pos1
+              if (`p₂`.>=($anon.this.end1)) return 1 else ()
+              $anon.this.pos1 = `p₂`.+(1)
+              val `x₂`: scala.Int = in1.apply(`p₂`)
+              if (`x₂`.%(2).==(0)) {
+                $anon.this.i5 = `x₂`
+                $anon.this.z3 = true
+              } else ()
+            } else $anon.this.z4 = true
+            if ($anon.this.z3) {
+              $anon.this.z0 = false
+              $anon.this.z3 = false
+              val `y₂`: scala.Int = $anon.this.i0.*($anon.this.i5)
+              $anon.this.j0 = $anon.this.j0.-(1L)
+              val n: scala.Int = $anon.this.outLen
+              out.update(n, `y₂`)
+              $anon.this.outLen = n.+(1)
+            } else ()
+          } else ()
+        } else {
+          $anon.this.finished = true
+          return -3
+        }
+        -3
+      }
+    }
+
+    (new $anon(): strom.runtime.Segment)
+  }
+  seg.out = new scala.Array[scala.Int](cap)
+
+  (seg: strom.runtime.Segment)
+})

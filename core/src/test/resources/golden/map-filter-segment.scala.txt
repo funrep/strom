@@ -1,0 +1,43 @@
+// state slots: 
+((cap: scala.Int, budget0: scala.Int) => {
+  val seg: strom.runtime.Segment = {
+    final class $anon() extends strom.runtime.Segment(1, cap, budget0) {
+      def isFold: scala.Boolean = false
+      protected def stepImpl(): scala.Int = {
+        val in0: scala.Array[scala.Long] = $anon.this.in0.asInstanceOf[scala.Array[scala.Long]]
+        val out: scala.Array[scala.Long] = $anon.this.out.asInstanceOf[scala.Array[scala.Long]]
+        $anon.this.outLen = 0
+        if ($anon.this.finished) return -3 else ()
+        $anon.this.fuel = $anon.this.budget
+        if ($anon.this.started.unary_!) {
+          $anon.this.started = true
+          ()
+        } else ()
+        while (true) if ($anon.this.pos0.<($anon.this.end0).||($anon.this.ended0.unary_!)) {
+          if ($anon.this.fuel.<=(0)) return -2 else ()
+          $anon.this.fuel = $anon.this.fuel.-(1)
+          if ($anon.this.outLen.>=($anon.this.maxOut)) return -1 else ()
+          val p: scala.Int = $anon.this.pos0
+          if (p.>=($anon.this.end0)) return 0 else ()
+          $anon.this.pos0 = p.+(1)
+          val x: scala.Long = in0.apply(p)
+          val y: scala.Long = x.*(3)
+          if (y.%(2).==(0)) {
+            val n: scala.Int = $anon.this.outLen
+            out.update(n, y)
+            $anon.this.outLen = n.+(1)
+          } else ()
+        } else {
+          $anon.this.finished = true
+          return -3
+        }
+        -3
+      }
+    }
+
+    (new $anon(): strom.runtime.Segment)
+  }
+  seg.out = new scala.Array[scala.Long](cap)
+
+  (seg: strom.runtime.Segment)
+})

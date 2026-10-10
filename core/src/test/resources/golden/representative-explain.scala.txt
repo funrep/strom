@@ -1,0 +1,3 @@
+stages:   source:port0[stateless,OneToOne] → flatMap[stateless,Many] → source:port1[stateless,OneToOne] → filter[stateless,AtMostOne] → zipWith[stateful,OneToOne] → take[stateful,Bounded] → fold[stateful,AtMostOne,associative]
+stateless: false   associativeFold: true
+IR:       Linear(Unfold[AtMost1,suspends]<zip:pull-both(Nested(Unfold[Many,suspends]<port0>, x => Linear(For<range>)), Linear(Unfold[AtMost1,suspends]<port1|filter>))|take>)

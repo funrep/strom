@@ -1,0 +1,70 @@
+package strom.zio
+
+import scala.reflect.ClassTag
+import _root_.zio.{Chunk, Trace, ZIO}
+import _root_.zio.stream.{ZChannel, ZPipeline, ZStream}
+import strom.runtime.{Runner, SegmentFactory}
+
+/** Runs compiled one-input Ström segments as ZIO stream pipelines.
+ *
+ *  Input chunks are read with `ZChannel.readWithCause` and copied once into a primitive array
+ *  (`Chunk.toArray`); outputs are fresh primitive arrays wrapped by `Chunk.fromArray`. When a
+ *  step uses up its work budget the channel runs `ZIO.yieldNow`. */
+object StromZio:
+
+  def pipeline[A: ClassTag, B](f: SegmentFactory[B], maxOut: Int = 1024, budget: Int = 4096)(
+      using Trace): ZPipeline[Any, Nothing, A, B] =
+    require(f.numInputs == 1 && !f.isFold, "pipeline expects a one-input emitting segment")
+    ZPipeline.fromChannel(channel[A, B](f, maxOut, budget))
+
+  /** A one-input fold: the stream's single element is the result. */
+  def fold[A: ClassTag, R](f: SegmentFactory[R], budget: Int = 4096)(using Trace): ZPipeline[Any, Nothing, A, R] =
+    require(f.numInputs == 1 && f.isFold, "fold expects a one-input fold segment")
+    ZPipeline.fromChannel(channel[A, R](f, 1, budget))
+
+  def runFold[Rq, E, A: ClassTag, R](f: SegmentFactory[R], budget: Int = 4096)(s: ZStream[Rq, E, A])(
+      using Trace): ZIO[Rq, E, R] =
+    s.via(fold[A, R](f, budget)).runHead.map(_.get)
+
+  /** Fuses the pure operators of an ordinary ZStream expression: maximal runs of `map`,
+   *  `filter`, `take` and `flatMap` (onto `ZStream.range`) become compiled segments; every other
+   *  operator is kept as written. */
+  inline def fused[S <: ZStream[?, ?, ?]](inline stream: S): S = ${ FusedMacro.fused[S]('stream) }
+
+  /** The runs `fused` would compile for an expression, one per line (a compile-time constant). */
+  inline def fusedPlan(inline stream: ZStream[?, ?, ?]): String = ${ FusedMacro.plan('stream) }
+
+  private def channel[A, O](f: SegmentFactory[O], maxOut: Int, budget: Int)(using tag: ClassTag[A], t: Trace)
+      : ZChannel[Any, Nothing, Chunk[A], Any, Nothing, Chunk[O], Any] =
+    ZChannel.suspend {
+      // A fresh, thread-confined segment per run; a channel runs its steps sequentially.
+      val runner = Runner(f, maxOut, budget)
+
+      def go(): ZChannel[Any, Nothing, Chunk[A], Any, Nothing, Chunk[O], Any] =
+        runner.next() match
+          case Runner.NeedInput(_) =>
+            ZChannel.readWithCause(
+              (in: Chunk[A]) => ZChannel.suspend {
+                val arr = in.toArray
+                runner.offer(0, arr, 0, arr.length)
+                go()
+              },
+              cause => ZChannel.refailCause(cause),
+              _ => ZChannel.suspend { runner.endOfInput(0); go() },
+            )
+          case Runner.Emit =>
+            ZChannel.write(copyOut(runner)) *> ZChannel.suspend(go())
+          case Runner.Yield =>
+            ZChannel.fromZIO(ZIO.yieldNow) *> ZChannel.suspend(go())
+          case Runner.Done =>
+            if runner.isFold then ZChannel.write(Chunk.single(runner.result)) else ZChannel.unit
+
+      go()
+    }
+
+  private def copyOut[O](runner: Runner[O]): Chunk[O] =
+    val src = runner.outArray
+    val n = runner.outLength
+    val dst = java.lang.reflect.Array.newInstance(src.getClass.getComponentType, n)
+    System.arraycopy(src, runner.outOffset, dst, 0, n)
+    Chunk.fromArray(dst.asInstanceOf[Array[O]])

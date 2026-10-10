@@ -1,0 +1,200 @@
+package strom.loom
+
+import java.util.concurrent.{ArrayBlockingQueue, BlockingQueue, LinkedBlockingQueue, Semaphore, ThreadFactory}
+import java.util.concurrent.atomic.AtomicInteger
+import strom.loom.StromLoom.*
+import strom.runtime.*
+
+/** Executes a [[ParallelPlan]] on threads. Tiers are connected by bounded queues of [[Msg]].
+ *
+ *  Coordination (readers, coordinators, routers) runs on virtual threads; the CPU-bound
+ *  workers run on `compute` threads: virtual by default, or e.g. a dedicated pool of platform
+ *  threads (`Thread.ofPlatform().factory()`) to keep fused loops off the carrier threads that
+ *  serve I/O. */
+object LoomParallel:
+  final case class Config(
+      parallelism: Int = Runtime.getRuntime.availableProcessors(),
+      queueCapacity: Int = 16,
+      maxOut: Int = 1024,
+      budget: Int = 4096,
+      compute: ThreadFactory = Thread.ofVirtual().name("strom-worker-", 0).factory(),
+  ):
+    require(parallelism > 0 && queueCapacity > 0)
+
+  /** Running tiers. `join` waits for the last tier, then stops the upstream tiers: a downstream
+   *  tier may finish early (e.g. `take`), leaving upstream ones blocked on a full queue.
+   *  `cancel` interrupts everything. */
+  final class Running(val tiers: Seq[Seq[Thread]]):
+    def threads: Seq[Thread] = tiers.flatten
+    def join(): Unit =
+      tiers.last.foreach(_.join())
+      tiers.init.flatten.foreach(_.interrupt())
+      threads.foreach(_.join())
+    def cancel(): Unit = threads.foreach(_.interrupt())
+
+  private val coordination: ThreadFactory = Thread.ofVirtual().name("strom-coord-", 0).factory()
+
+  /** Starts the plan reading `input` and writing `output` (ends with `End`, or `Failed`). */
+  def start(plan: ParallelPlan[?], input: BlockingQueue[Msg], output: BlockingQueue[Msg], cfg: Config = Config()): Running =
+    var in = input
+    val tiers = plan.tiers.zipWithIndex.map { (tier, i) =>
+      val out = if i == plan.tiers.size - 1 then output else ArrayBlockingQueue[Msg](cfg.queueCapacity)
+      val ts = startTier(tier, in, out, cfg)
+      in = out
+      ts
+    }
+    Running(tiers)
+
+  private def onYield(): Unit =
+    if Thread.interrupted() then throw InterruptedException()
+    Thread.`yield`()
+
+  private def spawn(f: ThreadFactory)(body: => Unit): Thread =
+    val t = f.newThread(() =>
+      try body
+      catch case _: InterruptedException => ()
+    )
+    t.start()
+    t
+
+  private def chunkOf(d: Data) = ArrayChunk(d.array, d.offset, d.length)
+
+  private def startTier(tier: Tier, in: BlockingQueue[Msg], out: BlockingQueue[Msg], cfg: Config): Seq[Thread] = tier match
+    case Tier.Single(f) =>
+      Seq(spawn(cfg.compute)(StromLoom.run(f, Vector(in), out, cfg.maxOut, cfg.budget)))
+    case Tier.Replicated(f) =>
+      ordered(in, out, cfg, f, (seg, c) => Chunks.processStateless(seg, c, () => onYield()),
+        (acc, r) => { val c = r.asInstanceOf[ArrayChunk]; if c.length > 0 then out.put(Data(c.array, c.offset, c.length)); acc },
+        _ => ())
+    case Tier.PartialFold(f, combine) =>
+      var any = false
+      ordered(in, out, cfg, f, (seg, c) => Chunks.partialFold(seg, c, () => onYield()),
+        (acc, r) => { val v = if any then combine(acc, r) else r; any = true; v },
+        acc => {
+          val res = if any then acc else Chunks.end(f.create(cfg.maxOut, cfg.budget))._2
+          out.put(Result(res))
+        })
+    case Tier.Keyed(f, partitioner) => keyed(in, out, cfg, f, partitioner)
+
+  // ------------------------------------------------------------------ ordered (replicated / partial fold)
+
+  private sealed trait Event
+  private final case class Input(chunk: ArrayChunk) extends Event
+  private case object InputEnd extends Event
+  private final case class Done(seq: Long, value: Any) extends Event
+  private final case class Fail(e: Throwable) extends Event
+  private final class Box(val value: Any)
+
+  /** Chunks go round-robin to N workers; results are released in input order through a
+   *  [[ReorderBuffer]] whose window is enforced by a semaphore on the reader. */
+  private def ordered(in: BlockingQueue[Msg], out: BlockingQueue[Msg], cfg: Config, f: SegmentFactory[?],
+                      work: (Segment, ArrayChunk) => Any, deliver: (Any, Any) => Any, finish: Any => Unit): Seq[Thread] =
+    val n = cfg.parallelism
+    val window = 2 * n + cfg.queueCapacity
+    val permits = Semaphore(window)
+    val events = LinkedBlockingQueue[Event]()
+    val jobs = Vector.fill(n)(LinkedBlockingQueue[(Long, ArrayChunk)]())
+    val workers = (0 until n).map { w =>
+      spawn(cfg.compute) {
+        val seg = f.create(cfg.maxOut, cfg.budget)
+        while true do
+          val (seq, chunk) = jobs(w).take()
+          if seq < 0 then throw InterruptedException() // stop
+          try events.put(Done(seq, work(seg, chunk)))
+          catch
+            case e: InterruptedException => throw e
+            case e: Throwable => events.put(Fail(e)); throw InterruptedException()
+      }
+    }
+    val reader = spawn(coordination) {
+      var reading = true
+      while reading do
+        permits.acquire()
+        in.take() match
+          case d: Data   => events.put(Input(chunkOf(d)))
+          case End       => events.put(InputEnd); reading = false
+          case Failed(e) => events.put(Fail(e)); reading = false
+          case Result(_) => events.put(Fail(IllegalStateException("unexpected Result"))); reading = false
+    }
+    val coordinator = spawn(coordination) {
+      val reorder = ReorderBuffer[Box](window)
+      val inFlight = InFlight(window)
+      var seq = 0L
+      var ended = false
+      var acc: Any = null
+      var running = true
+      def stop(): Unit =
+        jobs.foreach(_.put((-1L, null)))
+        running = false
+      while running do
+        events.take() match
+          case Input(chunk) =>
+            if !inFlight.tryAcquire() then throw IllegalStateException("in-flight window exceeded")
+            jobs((seq % n).toInt).put((seq, chunk))
+            seq += 1
+          case InputEnd => ended = true
+          case Done(s, v) =>
+            reorder.put(s, Box(v))
+            var b = reorder.poll()
+            while b != null do
+              acc = deliver(acc, b.value)
+              inFlight.release()
+              permits.release()
+              b = reorder.poll()
+          case Fail(e) =>
+            out.put(Failed(e))
+            stop()
+            reader.interrupt()
+        if running && ended && reorder.expected == seq then
+          finish(acc)
+          out.put(End)
+          stop()
+    }
+    workers :+ reader :+ coordinator
+
+  // ------------------------------------------------------------------ keyed
+
+  /** A router splits each chunk by key into per-partition queues; one stateful instance per
+   *  partition; the last partition to finish sends `End`. */
+  private def keyed(in: BlockingQueue[Msg], out: BlockingQueue[Msg], cfg: Config, f: SegmentFactory[?],
+                    partitioner: Partitioner): Seq[Thread] =
+    val n = cfg.parallelism
+    val queues = Vector.fill(n)(ArrayBlockingQueue[Msg](cfg.queueCapacity))
+    val remaining = AtomicInteger(n)
+    val failed = java.util.concurrent.atomic.AtomicBoolean(false)
+    val workers = (0 until n).map { p =>
+      spawn(cfg.compute) {
+        val seg = f.create(cfg.maxOut, cfg.budget)
+        def emit(c: ArrayChunk): Unit = if c.length > 0 then out.put(Data(c.array, c.offset, c.length))
+        try
+          var running = true
+          while running do
+            queues(p).take() match
+              case d: Data => emit(Chunks.feed(seg, chunkOf(d), () => onYield())._1)
+              case End =>
+                val (last, res) = Chunks.end(seg, () => onYield())
+                emit(last)
+                if seg.isFold then out.put(Result(res))
+                running = false
+              case Failed(e) => throw e
+              case Result(_) => throw IllegalStateException("unexpected Result")
+          if remaining.decrementAndGet() == 0 && !failed.get() then out.put(End)
+        catch
+          case e: InterruptedException => throw e
+          case e: Throwable => if failed.compareAndSet(false, true) then out.put(Failed(e))
+      }
+    }
+    val router = spawn(coordination) {
+      var routing = true
+      while routing do
+        in.take() match
+          case d: Data =>
+            val parts = partitioner.route(d.array, d.offset, d.length, n)
+            for p <- 0 until n do
+              val len = java.lang.reflect.Array.getLength(parts(p))
+              if len > 0 then queues(p).put(Data(parts(p), 0, len))
+          case End => queues.foreach(_.put(End)); routing = false
+          case m @ Failed(_) => queues.foreach(_.put(m)); routing = false
+          case Result(_) => queues.foreach(_.put(Failed(IllegalStateException("unexpected Result")))); routing = false
+    }
+    workers :+ router

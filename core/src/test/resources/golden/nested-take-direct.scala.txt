@@ -1,0 +1,32 @@
+{
+  var arr1: scala.Array[scala.Int] = null.asInstanceOf[scala.Array[scala.Int]]
+  var nr2: scala.Long = 0L
+  var i3: scala.Int = 0
+  var z4: scala.Long = 0L
+  var acc5: scala.Long = 0L
+  var from6: scala.Int = 0
+  var len7: scala.Int = 0
+  var i8: scala.Int = 0
+  z4 = 0L
+  acc5 = z4
+  nr2 = GoldenSuite.this.n.toLong
+  arr1 = GoldenSuite.this.a
+  i3 = 0
+  while (nr2.>(0L).&&(i3.<(arr1.length))) {
+    val idx: scala.Int = i3
+    i3 = idx.+(1)
+    val y: scala.Int = arr1.apply(idx)
+    from6 = 0
+    len7 = y.-(from6)
+    i8 = 0
+    while (nr2.>(0L).&&(i8.<(len7))) {
+      val `idx₂`: scala.Int = i8
+      i8 = `idx₂`.+(1)
+      val `y₂`: scala.Int = from6.+(`idx₂`)
+      val `y₃`: scala.Int = `y₂`.*(2)
+      nr2 = nr2.-(1L)
+      acc5 = acc5.+(1L)
+    }
+  }
+  acc5
+}

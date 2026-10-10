@@ -50,6 +50,10 @@ class FusedSuite extends munit.FunSuite:
     s => s.collect { case x if x % 2 == 0 => x * 3 }.mapFilter(x => Option.when(x > 4)(x - 1)).zipWithIndex.map((x, i) => x + i.toInt),
     s => StromFs2.fused(s.collect { case x if x % 2 == 0 => x * 3 }.mapFilter(x => Option.when(x > 4)(x - 1)).zipWithIndex.map((x, i) => x + i.toInt)))
 
+  same("zip / zipWithIndex with untupled lambdas")(
+    s => s.zip(Stream.range(0, 500).covary[IO]).map((x, y) => x * y).zipWithIndex.collect { case (v, i) if i % 2 == 0 => v },
+    s => StromFs2.fused(s.zip(Stream.range(0, 500).covary[IO]).map((x, y) => x * y).zipWithIndex.collect { case (v, i) if i % 2 == 0 => v }))
+
   same("scan / drop / takeWhile / dropWhile")(
     s => s.dropWhile(_ < 3).scan(0L)(_ + _).drop(2L).takeWhile(_ < 900L).map(_ * 2),
     s => StromFs2.fused(s.dropWhile(_ < 3).scan(0L)(_ + _).drop(2L).takeWhile(_ < 900L).map(_ * 2)))

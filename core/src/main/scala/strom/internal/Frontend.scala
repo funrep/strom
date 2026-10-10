@@ -186,7 +186,7 @@ object Frontend:
       val c2 = mapper.transformCaseDef(c)(owner)
       CaseDef.copy(c2)(c2.pattern, c2.guard, k(c2.rhs.asExprOf[B]).asTerm)
     }
-    Match(selector, cs :+ CaseDef(Wildcard(), None, Literal(UnitConstant()))).changeOwner(owner).asExprOf[Unit]
+    Tuples.simplify(Match(selector, cs :+ CaseDef(Wildcard(), None, Literal(UnitConstant())))).changeOwner(owner).asExprOf[Unit]
 
   /** Beta-reduction by substitution: replaces references to `params` in `body` with `args`.
    *  Runs with the `Quotes` of the splice the result is used in; `body` and `params` come
@@ -198,4 +198,4 @@ object Frontend:
       override def transformTerm(t: Term)(owner: Symbol): Term = t match
         case Ident(_) if m.contains(t.symbol) => m(t.symbol)
         case _ => super.transformTerm(t)(owner)
-    mapper.transformTerm(body.asInstanceOf[Term])(Symbol.spliceOwner)
+    Tuples.simplify(mapper.transformTerm(body.asInstanceOf[Term])(Symbol.spliceOwner))

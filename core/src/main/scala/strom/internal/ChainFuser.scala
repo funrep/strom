@@ -19,6 +19,8 @@ abstract class ChainFuser(using val q: Quotes):
     case Take(n: Term)
     case FlatMap(f: Term)
     case ZipWith(that: Term, f: Term)
+    /** `zip`: pairs, built from staging-time components (unboxed unless they escape). */
+    case Zip(that: Term)
     case Fold(z: Term, op: Term)
     case Collect(pf: Term)
     case MapOption(f: Term)
@@ -150,6 +152,7 @@ abstract class ChainFuser(using val q: Quotes):
 
   private def name(o: PureOp): String = o match
     case _: PureOp.MapOption => "mapFilter"
+    case _: PureOp.Zip => "zip"
     case _ => o.productPrefix.updated(0, o.productPrefix.head.toLower)
 
   final class Run(val original: Term, var pipe: Pipe[?], var inputs: Vector[(Term, TypeRepr)]):
@@ -177,7 +180,7 @@ abstract class ChainFuser(using val q: Quotes):
     }
 
     def canAdd(o: PureOp): Boolean = o match
-      case _: PureOp.ZipWith => run.forall(_.inputs.size < maxInputs)
+      case _: PureOp.ZipWith | _: PureOp.Zip => run.forall(_.inputs.size < maxInputs)
       case _ => true
 
     for c <- calls do
@@ -216,6 +219,11 @@ abstract class ChainFuser(using val q: Quotes):
             r.pipe = Pipe.FlatMapP[a, b](up, Pipe.Inner { x =>
               innerPipe(Frontend.subst(body, List(param), List(x))).asInstanceOf[Pipe[b]]
             })
+          case PureOp.Zip(that) =>
+            elemOf(that.tpe).asType match
+              case '[t] =>
+                val right = zipOperand[t](r, that)
+                r.pipe = Pipe.ZipWithP[a, t, b](up, right, Pipe.Fn2((x, y) => '{ ($x, $y) }.asExprOf[b]))
           case PureOp.ZipWith(that, f) =>
             elemOf(that.tpe).asType match
               case '[t] =>
@@ -239,6 +247,14 @@ abstract class ChainFuser(using val q: Quotes):
           case PureOp.DropWhile(p) => r.pipe = Pipe.DropWhileP[a](up, front.fn1[a, Boolean](p.asExprOf[a => Boolean]))
           case PureOp.Fold(z, f) =>
             r.fold = Some(Pipe.FoldSink[a, b](up, z.asExprOf[b], front.fn2[b, a, b](f.asExprOf[(b, a) => b]), associative = false))
+
+  /** A zip operand: inlined if pure, else fused on its own and added as an input. */
+  private def zipOperand[t: Type](r: Run, that: Term): Pipe[t] =
+    if pureInner(that) then innerPipe(that).asInstanceOf[Pipe[t]]
+    else
+      val port = r.inputs.size
+      r.inputs :+= (fuse(that) -> elemOf(that.tpe))
+      Pipe.SrcPort[t](port)
 
   /** Pipe for a pure inner stream (checked by `pureInner`). */
   private def innerPipe(t: Any): Pipe[?] =

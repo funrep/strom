@@ -62,7 +62,25 @@ final class Gen(using val q: Quotes)(
 
   /** Let-insertion: bind a computed element to a `val` before it can be duplicated downstream. */
   def letIn[A: Type](e: Expr[A])(k: Expr[A] => Expr[Unit]): Expr[Unit] =
-    if trivial(e.asTerm) then k(e) else bind("y", e)(k)
+    val t = e.asTerm
+    Tuples.components(t) match
+      // A tuple is not allocated: its components are bound, and the constructor over the bound
+      // variables is passed on, to be simplified away by projections / tuple patterns downstream.
+      case Some(args) if !args.forall(trivial) =>
+        def go(rest: List[Term], acc: List[Term]): Expr[Unit] = rest match
+          case Nil => k(rebuildTuple(t, acc.reverse).asExprOf[A])
+          case a :: tl if trivial(a) => go(tl, a :: acc)
+          case a :: tl => a.tpe.widen.asType match
+            case '[c] => bind("c", a.asExprOf[c])(v => go(tl, v.asTerm :: acc))
+        go(args, Nil)
+      case Some(_) => k(e)
+      case None => if trivial(t) then k(e) else bind("y", e)(k)
+
+  private def rebuildTuple(t: Term, args: List[Term]): Term = t match
+    case Inlined(_, Nil, inner) => rebuildTuple(inner, args)
+    case Typed(inner, _)        => rebuildTuple(inner, args)
+    case a @ Apply(fn, _)       => Apply.copy(a)(fn, args)
+    case _ => report.errorAndAbort("internal: not a tuple constructor")
 
   /** `{ val name = rhs; body(name) }`. Binders are built with reflection rather than as
    *  `'{ val y = ..; ${ k('y) } }`, so that no code value escapes the splice it was made in. */

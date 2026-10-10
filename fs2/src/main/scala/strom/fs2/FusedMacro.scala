@@ -41,6 +41,7 @@ private[fs2] final class Fs2Fuser(using Quotes) extends ChainFuser:
     case ("collect", List(List(pf)))           => Some(PureOp.Collect(pf))
     case ("mapFilter*", List(List(f)))         => Some(PureOp.MapOption(f)) // cats FunctorFilter syntax
     case ("zipWithIndex", Nil)                 => Some(PureOp.ZipWithIndex())
+    case ("zip", List(List(that)))             => Some(PureOp.Zip(that))
     case ("scan", List(List(z), List(f)))      => Some(PureOp.Scan(z, f))
     case ("drop", List(List(n)))               => Some(PureOp.Drop(n))
     case ("dropWhile", List(List(p)))          => Some(PureOp.DropWhile(p))

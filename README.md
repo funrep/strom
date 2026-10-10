@@ -110,7 +110,7 @@ published artifacts on realistic fs2 / ZIO pipelines.
 
 | | fs2 | ZIO |
 |---|---|---|
-| fused operators | `map`, `filter`, `collect`, `mapFilter` (cats syntax), `take`, `drop`, `takeWhile`, `dropWhile`, `zipWithIndex`, `scan`, `fold`, `zipWith`, `flatMap` onto `Stream.range` | `map`, `filter`, `collect`, `take`, `drop`, `takeWhile`, `dropWhile`, `zipWithIndex`, `scan`, `zipWith`, `flatMap` onto `ZStream.range` |
+| fused operators | `map`, `filter`, `collect`, `mapFilter` (cats syntax), `take`, `drop`, `takeWhile`, `dropWhile`, `zipWithIndex`, `scan`, `fold`, `zip`, `zipWith`, `flatMap` onto `Stream.range` | `map`, `filter`, `collect`, `take`, `drop`, `takeWhile`, `dropWhile`, `zipWithIndex`, `scan`, `zipWith`, `flatMap` onto `ZStream.range` |
 | inputs per run | up to 4 (`zipWith`; a pure `zipWith` operand is inlined instead) | up to 4 |
 | yields to the scheduler | `cede` when a `Spawn[F]` exists (not for `Pure`) | `yieldNow` |
 
@@ -258,7 +258,9 @@ request or I/O callback would see.
 * Pipelines must be written inline (directly, or via `inline def`).
 * At most 4 input ports; the state slot pool (96 Int / 32 Long / 32 Double / 16 Float /
   96 Boolean / 48 reference slots) bounds pipeline size. Exceeding it is a compile error.
-* `zip` and `zipWithIndex` allocate a tuple per element; use `zipWith` on the hot path.
+* Tuples from `zip` / `zipWithIndex` / user lambdas are not allocated when they are only projected
+  (`_._1`), destructured (`(x, i) => …`) or matched with tuple patterns (`collect { case (x, y) if … }`);
+  a tuple that escapes (emitted, folded, stored across a pull or `flatMap`) is still allocated.
 * `collect` is staged as a `match` only for partial-function literals; others go through
   `isDefinedAt` / `apply`.
 

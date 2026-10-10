@@ -223,7 +223,7 @@ workers. Lower is better; halving it when N doubles would be perfect scaling.
 * **Good:** near-perfect scaling up to 4 workers (8.0 → 2.2 ns, ~3.6×). The executor's own
   overhead is small: 1 worker ≈ the single-thread baseline.
 * **Limited:** 4 → 8 adds little. The M1's other 4 cores are slower efficiency cores, and the
-  pipeline starts to be limited by memory bandwidth. fs2 flattens earlier (more coordination per chunk).
+  queue hand-offs start to matter (not profiled further). fs2 flattens earlier (more coordination per chunk).
 * Measured before the 100 µs time-slice change; ZIO scaling (`zioPar`) has not been run yet.
 
 ### Responsiveness: does fused work starve other tasks?

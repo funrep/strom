@@ -333,8 +333,8 @@ final class Gen(using val q: Quotes)(
     val (ls, rs) = if describing then (StStream.shape(l), StStream.shape(r)) else ("", "")
     def lab(kind: String)(s: StStream[C]): StStream[C] = s match
       case Linear(p) =>
+        // Only the label: whether a producer is composite comes from the producers it was built from.
         p.label = s"$kind($ls, $rs)"
-        p.composite = kind.contains("pull")
         s
       case _ => s
     (l, r) match
@@ -357,45 +357,48 @@ final class Gen(using val q: Quotes)(
                 if !u2.suspends then u1.step(s._1)(a => u2.step(s._2)(b => letIn(f(a, b))(k)))
                 else u2.step(s._2)(b => u1.step(s._1)(a => letIn(f(a, b))(k))),
               u1.suspends || u2.suspends)))
-      // One side yields exactly one element per step: pull the other side, then step it
-      // (Kiselyov's push_linear). The pulled element is kept until it is actually used.
-      case (Linear(lp), _) if card(lp) == Card.Many =>
-        val pr = pull(r)
-        forUnfold(lp) match
-          case u: UnfoldP[A, s] => lab("zip:step-left/pull-right")(
-            Linear(UnfoldP[C, s](
-              k => seq(pr.init, u.init(k)),
-              s => '{ ${ u.term(s) } && !${ pr.ended.get } },
-              Card.AtMost1,
-              s => k => seq(pr.fill, '{ if (${ pr.have.get }) ${ u.step(s)(a => seq(pr.have := '{ false }, letIn(f(a, pr.cur.get))(k))) } }),
-              u.suspends || suspends(r))))
-      case (_, Linear(rp)) if card(rp) == Card.Many =>
-        val pl = pull(l)
-        forUnfold(rp) match
-          case u: UnfoldP[B, s] => lab("zip:pull-left/step-right")(
-            Linear(UnfoldP[C, s](
-              k => seq(pl.init, u.init(k)),
-              s => '{ !${ pl.ended.get } && ${ u.term(s) } },
-              Card.AtMost1,
-              s => k => seq(pl.fill, '{ if (${ pl.have.get }) ${ u.step(s)(b => seq(pl.have := '{ false }, letIn(f(pl.cur.get, b))(k))) } }),
-              u.suspends || suspends(l))))
-      // General case (Kiselyov's make_linear on both sides).
+      // One side yields exactly one element per step and cannot suspend: the other side drives in
+      // its own (possibly nested) loops and this side is stepped inside (strymonas' push_linear).
+      case (Linear(lp), _) if card(lp) == Card.Many && !lp.suspends =>
+        lab("zip:step-left-inside-right")(pushLinear[B, A, C](r, lp, (b, a) => f(a, b)))
+      case (_, Linear(rp)) if card(rp) == Card.Many && !rp.suspends =>
+        lab("zip:step-right-inside-left")(pushLinear[A, B, C](l, rp, f))
+      // Otherwise linearise only the shallower side (a pull) and let the other side drive.
       case _ =>
-        val pl = pull(l)
-        val pr = pull(r)
-        lab("zip:pull-both")(Linear(UnfoldP[C, Unit](
-          k => seq(pl.init, pr.init, k(())),
-          _ => '{ !${ pl.ended.get } && !${ pr.ended.get } },
-          Card.AtMost1,
-          _ => k => seq(pl.fill, '{
-            if (${ pl.have.get }) {
-              ${ pr.fill }
-              if (${ pr.have.get }) {
-                ${ seq(pl.have := '{ false }, pr.have := '{ false }, letIn(f(pl.cur.get, pr.cur.get))(k)) }
-              }
-            }
-          }),
-          suspends(l) || suspends(r))))
+        if depth(r) <= depth(l) then lab("zip:pull-right")(drivePull[A, B, C](l, pull(r), f))
+        else lab("zip:pull-left")(drivePull[B, A, C](r, pull(l), (b, a) => f(a, b)))
+
+  /** How deeply nested a stream is: the cost of linearising it. */
+  private def depth(s: StStream[?]): Int = s match
+    case Linear(p)       => if p.composite then 1 else 0
+    case _: Nested[?, ?] => 2
+
+  /** Adds `cond` to the termination of the innermost loop only. */
+  private def innermostTermination[A](s: StStream[A], cond: () => Expr[Boolean]): StStream[A] = s match
+    case Linear(p) =>
+      // `cond` goes last: it is only evaluated (e.g. a pull filled) when the loop would step.
+      forUnfold(p) match
+        case u: UnfoldP[A, s] =>
+          Linear(derived(UnfoldP[A, s](u.init, st => '{ ${ u.term(st) } && ${ cond() } }, u.card, u.step, u.suspends)(using u.tpe), u))
+    case n: Nested[A, b] => Nested[A, b](n.p, x => innermostTermination(n.f(x), cond))(using n.tpe)
+
+  /** `drive` keeps its loops; `lin` (exactly one element per step, never suspends) is stepped once
+   *  per driving element, and its termination stops every driving loop. */
+  private def pushLinear[D, L, C: Type](drive: StStream[D], lin: Producer[L], f: (Expr[D], Expr[L]) => Expr[C]): StStream[C] =
+    forUnfold(lin) match
+      case u: UnfoldP[L, s] =>
+        var st: Option[s] = None
+        val init = u.init { x => st = Some(x); unit }
+        val driven = moreTermination(drive, () => u.term(st.get))
+        withOuterInit(mapRaw[D, C](driven, d => k => u.step(st.get)(x => letIn(f(d, x))(k))), () => init)
+
+  /** `drive` keeps its loops; the pulled side is filled just before the innermost driving step
+   *  (so a suspension never loses a driving element) and its end stops every driving loop. */
+  private def drivePull[D, P, C: Type](drive: StStream[D], pl: Pull[P], f: (Expr[D], Expr[P]) => Expr[C]): StStream[C] =
+    val notEnded = () => '{ !${ pl.ended.get } }
+    val ready = () => '{ ${ pl.fill }; ${ pl.have.get } }
+    val driven = innermostTermination(moreTermination(drive, notEnded), ready)
+    withOuterInit(mapRaw[D, C](driven, d => k => seq(pl.have := '{ false }, letIn(f(d, pl.cur.get))(k))), () => pl.init)
 
   /** Tumbling windows of `size` elements, each folded with `op` starting from `z`. */
   def windowFold[A, S: Type](s: StStream[A], size: Expr[Int], z: Expr[S], op: (Expr[S], Expr[A]) => Expr[S]): StStream[S] =

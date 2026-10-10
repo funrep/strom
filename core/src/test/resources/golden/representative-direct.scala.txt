@@ -5,65 +5,49 @@
   var have4: scala.Boolean = false
   var ended5: scala.Boolean = false
   var cur6: scala.Int = 0
-  var active7: scala.Boolean = false
-  var x8: scala.Int = 0
-  var from9: scala.Int = 0
-  var len10: scala.Int = 0
-  var i11: scala.Int = 0
-  var i12: scala.Int = 0
-  var have13: scala.Boolean = false
-  var ended14: scala.Boolean = false
-  var cur15: scala.Int = 0
-  var nr16: scala.Long = 0L
-  var z17: scala.Int = 0
-  var acc18: scala.Int = 0
-  z17 = 0
-  acc18 = z17
-  nr16 = GoldenSuite.this.n.toLong
+  var i7: scala.Int = 0
+  var nr8: scala.Long = 0L
+  var z9: scala.Int = 0
+  var acc10: scala.Int = 0
+  var from11: scala.Int = 0
+  var len12: scala.Int = 0
+  var i13: scala.Int = 0
+  z9 = 0
+  acc10 = z9
+  nr8 = GoldenSuite.this.n.toLong
   have4 = false
   ended5 = false
-  active7 = false
-  arr1 = GoldenSuite.this.a
-  i12 = 0
-  have13 = false
-  ended14 = false
   arr2 = GoldenSuite.this.b
   i3 = 0
-  while (nr16.>(0L).&&(ended5.unary_!.&&(ended14.unary_!))) {
-    while (have4.unary_!.&&(ended5.unary_!)) if (active7) while (have4.unary_!.&&(ended5.unary_!).&&(active7)) if (i11.<(len10)) {
-      val idx: scala.Int = i11
-      i11 = idx.+(1)
-      val y: scala.Int = from9.+(idx)
-      cur6 = y
-      have4 = true
-    } else active7 = false else if (i12.<(arr1.length)) {
-      val `idx₂`: scala.Int = i12
-      i12 = `idx₂`.+(1)
-      val `y₂`: scala.Int = arr1.apply(`idx₂`)
-      x8 = `y₂`
-      from9 = 0
-      len10 = x8.-(from9)
-      i11 = 0
-      active7 = true
-    } else ended5 = true
-    if (have4) {
-      while (have13.unary_!.&&(ended14.unary_!)) if (i3.<(arr2.length)) {
-        val `idx₃`: scala.Int = i3
-        i3 = `idx₃`.+(1)
-        val `y₃`: scala.Int = arr2.apply(`idx₃`)
-        if (`y₃`.%(2).==(0)) {
-          cur15 = `y₃`
-          have13 = true
+  arr1 = GoldenSuite.this.a
+  i7 = 0
+  while (nr8.>(0L).&&(ended5.unary_!.&&(i7.<(arr1.length)))) {
+    val idx: scala.Int = i7
+    i7 = idx.+(1)
+    val y: scala.Int = arr1.apply(idx)
+    from11 = 0
+    len12 = y.-(from11)
+    i13 = 0
+    while (nr8.>(0L).&&(ended5.unary_!.&&(i13.<(len12)).&&({
+      while (have4.unary_!.&&(ended5.unary_!)) if (i3.<(arr2.length)) {
+        val `idx₂`: scala.Int = i3
+        i3 = `idx₂`.+(1)
+        val `y₂`: scala.Int = arr2.apply(`idx₂`)
+        if (`y₂`.%(2).==(0)) {
+          cur6 = `y₂`
+          have4 = true
         } else ()
-      } else ended14 = true
-      if (have13) {
-        have4 = false
-        have13 = false
-        val `y₄`: scala.Int = cur6.*(cur15)
-        nr16 = nr16.-(1L)
-        acc18 = acc18.+(`y₄`)
-      } else ()
-    } else ()
+      } else ended5 = true
+      have4
+    }))) {
+      val `idx₃`: scala.Int = i13
+      i13 = `idx₃`.+(1)
+      val `y₃`: scala.Int = from11.+(`idx₃`)
+      have4 = false
+      val `y₄`: scala.Int = `y₃`.*(cur6)
+      nr8 = nr8.-(1L)
+      acc10 = acc10.+(`y₄`)
+    }
   }
-  acc18
+  acc10
 }

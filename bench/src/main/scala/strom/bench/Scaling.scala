@@ -56,6 +56,13 @@ class Scaling:
     _root_.fs2.Stream.emits(fs2Chunks).flatMap(_root_.fs2.Stream.chunk).covary[IO]
       .through(StromFs2.parallel[IO, Int, Int](plan, parallelism)).chunks.map(_.size.toLong).compile.foldMonoid.unsafeRunSync()
 
+  val zioChunks = chunks.map(zio.Chunk.fromArray(_))
+
+  @Benchmark def zioPar(): Long =
+    val eff = strom.zio.StromZio.parallel[Any, Nothing, Int, Int](plan, parallelism)(zio.stream.ZStream.fromChunks(zioChunks*))
+      .chunks.map(_.size.toLong).runSum
+    zio.Unsafe.unsafe(implicit u => zio.Runtime.default.unsafe.run(eff).getOrThrow())
+
   /** Sequential reference point: the same segment on one thread (independent of `parallelism`). */
   @Benchmark def sequential(): Long =
     val seg = single.create(1024, 1 << 16)

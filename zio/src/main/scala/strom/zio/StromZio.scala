@@ -1,9 +1,9 @@
 package strom.zio
 
 import scala.reflect.ClassTag
-import _root_.zio.{Chunk, Trace, ZIO}
-import _root_.zio.stream.{ZChannel, ZPipeline, ZStream}
-import strom.runtime.{Runner, Segment, SegmentFactory}
+import _root_.zio.{Chunk, Executor, Queue, Trace, ZIO}
+import _root_.zio.stream.{Take, ZChannel, ZPipeline, ZStream}
+import strom.runtime.*
 
 /** Runs compiled one-input Ström segments as ZIO stream pipelines.
  *
@@ -38,34 +38,122 @@ object StromZio:
    *  (`ZStream[R, E, ?]`s with element class tags `tags`), pulling each port with `toPull`. */
   def fusedRun[R, E, B](f: SegmentFactory[?], inputs: Vector[Any], tags: Vector[ClassTag[?]], maxOut: Int, budget: Int)(
       using Trace): ZStream[R, E, B] =
+    val ins = inputs.zip(tags).map((s, t) => fromElements(s.asInstanceOf[ZStream[R, E, Any]], t.asInstanceOf[ClassTag[Any]]))
+    toElements(driveChunks[R, E](f, maxOut, budget, ins))
+
+  // ------------------------------------------------------------------ parallel plans
+
+  /** Runs a [[ParallelPlan]]: replicated tiers on `parallelism` concurrent instances
+   *  (`mapZIOPar`, order preserved), partial folds combined in order, keyed tiers on one instance
+   *  per partition (bounded queues, merged), single tiers sequentially. CPU work runs on
+   *  `compute` if given (a dedicated executor keeps fused loops off the default one). */
+  def parallel[R, E, A: ClassTag, B](plan: ParallelPlan[B], parallelism: Int, compute: Option[Executor] = None,
+      maxOut: Int = Segment.DefaultMaxOut, budget: Int = Segment.DefaultBudget)(using Trace)
+      : ZStream[R, E, A] => ZStream[R, E, B] =
+    in =>
+      def cpu[X](x: => X): ZIO[Any, Nothing, X] = compute.fold(ZIO.succeed(x))(ex => ZIO.succeed(x).onExecutor(ex))
+      val last = plan.tiers.foldLeft(fromElements[R, E, Any](in, summon[ClassTag[A]].asInstanceOf[ClassTag[Any]])) { (s, tier) =>
+        tier match
+          case Tier.Replicated(f) =>
+            val pool = Pool(f, maxOut, budget)
+            s.mapZIOPar(parallelism)(c => cpu(pool.use(seg => Chunks.processStateless(seg, c))))
+          case Tier.PartialFold(f, combine) =>
+            val pool = Pool(f, maxOut, budget)
+            ZStream.fromZIO(
+              s.mapZIOPar(parallelism)(c => cpu(pool.use(seg => Chunks.partialFold(seg, c))))
+                .runFold(Option.empty[Any])((acc, r) => Some(acc.fold(r)(combine(_, r))))
+                .map(_.getOrElse(Chunks.end(f.create(maxOut, budget))._2))
+            ).map(singleton)
+          case Tier.Single(f) => driveChunks[R, E](f, maxOut, budget, Vector(s))
+          case Tier.Keyed(f, partitioner) => keyed(s, f, partitioner, parallelism, maxOut, budget)
+      }
+      toElements(last)
+
+  private def singleton(x: Any): ArrayChunk = ArrayChunk(Array[Any](x), 0, 1)
+
+  /** Stateless instances reused across chunks by concurrent tasks. */
+  private final class Pool(f: SegmentFactory[?], maxOut: Int, budget: Int):
+    private val free = java.util.concurrent.ConcurrentLinkedQueue[Segment]()
+    def use[X](body: Segment => X): X =
+      val seg = Option(free.poll()).getOrElse(f.create(maxOut, budget))
+      val x = body(seg)
+      free.offer(seg) // only returned on success: a poisoned instance is dropped
+      x
+
+  private def keyed[R, E](s: ZStream[R, E, ArrayChunk], f: SegmentFactory[?], partitioner: Partitioner, n: Int,
+      maxOut: Int, budget: Int)(using Trace): ZStream[R, E, ArrayChunk] =
     ZStream.unwrapScoped[R] {
-      ZIO.foreach(inputs)(s => s.asInstanceOf[ZStream[R, E, Any]].toPull).map { pulls =>
+      for
+        queues <- ZIO.foreach(Vector.range(0, n))(_ => Queue.bounded[Take[E, ArrayChunk]](4))
+        _ <- s.mapZIO { c =>
+               val parts = partitioner.route(c.array, c.offset, c.length, n)
+               ZIO.foreachDiscard(queues.indices) { p =>
+                 val len = java.lang.reflect.Array.getLength(parts(p))
+                 if len > 0 then queues(p).offer(Take.single(ArrayChunk(parts(p), 0, len))) else ZIO.unit
+               }
+             }.runForeachChunk(_ => ZIO.unit)
+             .foldCauseZIO(cause => ZIO.foreachDiscard(queues)(_.offer(Take.failCause(cause))),
+                           _ => ZIO.foreachDiscard(queues)(_.offer(Take.end)))
+             .forkScoped
+      yield ZStream.mergeAllUnbounded()(queues.map(q => driveChunks[R, E](f, maxOut, budget, Vector(ZStream.fromQueue(q).flattenTake)))*)
+    }
+
+  // ------------------------------------------------------------------ core loop
+
+  private def fromElements[R, E, A](s: ZStream[R, E, A], tag: ClassTag[A])(using Trace): ZStream[R, E, ArrayChunk] =
+    s.chunks.map(c => ArrayChunk(primitiveArray(c, tag), 0, c.length))
+
+  private def toElements[R, E, B](s: ZStream[R, E, ArrayChunk])(using Trace): ZStream[R, E, B] =
+    s.mapConcatChunk { c =>
+      if c.length == 0 then Chunk.empty
+      else
+        val dst = java.lang.reflect.Array.newInstance(c.array.getClass.getComponentType, c.length)
+        System.arraycopy(c.array, c.offset, dst, 0, c.length)
+        Chunk.fromArray(dst.asInstanceOf[Array[B]])
+    }
+
+  /** Drives a segment over chunk streams, pulling each port with `toPull`. Emits output chunks;
+   *  a fold emits one single-element chunk holding its result. */
+  private def driveChunks[R, E](f: SegmentFactory[?], maxOut: Int, budget: Int, inputs: Vector[ZStream[R, E, ArrayChunk]])(
+      using Trace): ZStream[R, E, ArrayChunk] =
+    ZStream.unwrapScoped[R] {
+      ZIO.foreach(inputs)(_.toPull).map { pulls =>
         // A fresh, thread-confined segment per stream run.
         val runner = Runner(f, maxOut, budget)
+        val pending = Array.fill(inputs.size)(Chunk.empty[ArrayChunk])
         var done = false
-        def loop: ZIO[R, Option[E], Chunk[B]] = ZIO.suspendSucceed {
+        def offer(p: Int, c: ArrayChunk): Unit = runner.offer(p, c.array, c.offset, c.length)
+        def loop: ZIO[R, Option[E], Chunk[ArrayChunk]] = ZIO.suspendSucceed {
           if done then ZIO.fail(None)
           else runner.next() match
             case Runner.NeedInput(p) =>
-              pulls(p).foldZIO(
-                {
-                  case None => runner.endOfInput(p); loop
-                  case Some(e) => ZIO.fail(Some(e))
-                },
-                chunk => {
-                  val arr = primitiveArray(chunk, tags(p).asInstanceOf[ClassTag[Any]])
-                  runner.offer(p, arr, 0, chunk.length)
-                  loop
-                })
-            case Runner.Emit => ZIO.succeed(copyOut(runner).asInstanceOf[Chunk[B]])
+              if pending(p).nonEmpty then
+                offer(p, pending(p).head)
+                pending(p) = pending(p).tail
+                loop
+              else
+                pulls(p).foldZIO(
+                  {
+                    case None => runner.endOfInput(p); loop
+                    case Some(e) => ZIO.fail(Some(e))
+                  },
+                  chunk => { pending(p) = chunk; loop })
+            case Runner.Emit => ZIO.succeed(Chunk.single(copyOutChunk(runner)))
             case Runner.Yield => ZIO.yieldNow *> loop
             case Runner.Done =>
               done = true
-              if runner.isFold then ZIO.succeed(Chunk.single(runner.result.asInstanceOf[B])) else ZIO.fail(None)
+              if runner.isFold then ZIO.succeed(Chunk.single(singleton(runner.result))) else ZIO.fail(None)
         }
         ZStream.repeatZIOChunkOption(loop)
       }
     }
+
+  private def copyOutChunk(runner: Runner[?]): ArrayChunk =
+    val src = runner.outArray
+    val n = runner.outLength
+    val dst = java.lang.reflect.Array.newInstance(src.getClass.getComponentType, n)
+    System.arraycopy(src, runner.outOffset, dst, 0, n)
+    ArrayChunk(dst, 0, n)
 
   /** The chunk as an array of its primitive element type (generic, so no `Object[]` cast). */
   private def primitiveArray[A](c: Chunk[A], tag: ClassTag[A]): AnyRef = c.toArray(using tag)

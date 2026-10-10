@@ -126,9 +126,11 @@ Plans are pure data. The executors live in the adapters:
 * `StromFs2.parallel(plan, parallelism, compute = Some(ec))`: `parEvalMap` (ordered) over a
   pool of reusable instances. With `compute`, CPU work runs via `evalOn`. Keyed tiers use one
   bounded `Channel` per partition and `parJoin`.
+* `StromZio.parallel(plan, parallelism, compute = Some(executor))`: `mapZIOPar` (ordered) over a
+  pool of instances, `onExecutor` for CPU work, bounded queues per partition for keyed tiers.
 
 The semantics are checked by `ParallelPlanSuite` (a sequential executor that still
-round-robins over several instances), `LoomParallelSuite` and `Fs2ParallelSuite` (random
+round-robins over several instances), `LoomParallelSuite`, `Fs2ParallelSuite` and `ZioParallelSuite` (random
 parallelism, queue sizes, budgets and thread kinds), all against the reference interpreter.
 
 ## Verification
@@ -151,7 +153,7 @@ parallelism, queue sizes, budgets and thread kinds), all against the reference i
 Benchmarks (they load every core, so run them on an otherwise idle machine):
 
 * `sbt "bench/Jmh/run -prof gc strom.bench.CheapStages strom.bench.Representative"`: ns and bytes per element.
-* `sbt "bench/Jmh/run strom.bench.Scaling"`: 1/2/4/8-way replicated tier (loom and fs2) vs sequential.
+* `sbt "bench/Jmh/run strom.bench.Scaling"`: 1/2/4/8-way replicated tier (loom, fs2, ZIO) vs sequential.
 * `sbt "bench/runMain strom.bench.Latency"`: lateness of a 1 ms ticker fiber while every core
   runs fused pipelines (with cede, without yields, direct loop, dedicated pool).
 * `sbt "bench/runMain strom.bench.check"`: all variants compute the same result.

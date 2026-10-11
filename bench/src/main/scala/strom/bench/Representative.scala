@@ -6,6 +6,7 @@ import cats.effect.IO
 import cats.effect.unsafe.implicits.global
 import strom.{Pipelines, Strom}
 import strom.fs2.StromFs2
+import strom.zio.StromZio
 import strom.runtime.Runner
 
 /** zip(a.flatMap(x => range(0, x)), b.filter(even)).map(*).take(n).sum — nested + zip + take.
@@ -49,6 +50,20 @@ class Representative:
   @Benchmark def fs2Fused(): Int =
     StromFs2.fused(fs2Of(a).flatMap(x => _root_.fs2.Stream.range(0, x)).zipWith(fs2Of(b).filter(_ % 2 == 0))(_ * _)
       .take(N.toLong).fold(0)(_ + _)).compile.lastOrError.unsafeRunSync()
+
+  @Benchmark def fs2FusedPar4(): Int =
+    StromFs2.fusedPar(4)(fs2Of(a).flatMap(x => _root_.fs2.Stream.range(0, x)).zipWith(fs2Of(b).filter(_ % 2 == 0))(_ * _)
+      .take(N.toLong).fold(0)(_ + _)).compile.lastOrError.unsafeRunSync()
+
+  @Benchmark def zioFused(): Int =
+    val eff = StromZio.fused(zioOf(a).flatMap(x => zio.stream.ZStream.range(0, x)).zipWith(zioOf(b).filter(_ % 2 == 0))(_ * _)
+      .take(N.toLong)).runSum
+    zio.Unsafe.unsafe(implicit u => zio.Runtime.default.unsafe.run(eff).getOrThrow())
+
+  @Benchmark def zioFusedPar4(): Int =
+    val eff = StromZio.fusedPar(4)(zioOf(a).flatMap(x => zio.stream.ZStream.range(0, x)).zipWith(zioOf(b).filter(_ % 2 == 0))(_ * _)
+      .take(N.toLong)).runSum
+    zio.Unsafe.unsafe(implicit u => zio.Runtime.default.unsafe.run(eff).getOrThrow())
 
   @Benchmark def fs2Plain(): Int =
     fs2Of(a).flatMap(x => _root_.fs2.Stream.range(0, x)).zipWith(fs2Of(b).filter(_ % 2 == 0))(_ * _)

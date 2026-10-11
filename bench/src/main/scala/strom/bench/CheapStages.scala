@@ -63,6 +63,24 @@ class CheapStages:
       .map(_ * 3).filter(_ % 4 != 1).map(_ + 7).map(x => x ^ (x >>> 3)).filter(_ % 3 != 0).map(_ * 2).map(_ - 1)
       .fold(0)(_ + _)).compile.lastOrError.unsafeRunSync()
 
+  @Benchmark def fs2FusedPar4(): Int =
+    StromFs2.fusedPar(4)(_root_.fs2.Stream.emits(fs2Chunks).flatMap(_root_.fs2.Stream.chunk).covary[IO]
+      .map(_ * 3).filter(_ % 4 != 1).map(_ + 7).map(x => x ^ (x >>> 3)).filter(_ % 3 != 0).map(_ * 2).map(_ - 1)
+      .fold(0)(_ + _)).compile.lastOrError.unsafeRunSync()
+
+  /** The plain ZStream code below, wrapped in `StromZio.fused` (`runSum` is a sink: not fused). */
+  @Benchmark def zioFused(): Int =
+    val eff = StromZio.fused(zio.stream.ZStream.fromChunks(zioChunks*)
+      .map(_ * 3).filter(_ % 4 != 1).map(_ + 7).map(x => x ^ (x >>> 3)).filter(_ % 3 != 0).map(_ * 2).map(_ - 1))
+      .runSum
+    zio.Unsafe.unsafe(implicit u => zio.Runtime.default.unsafe.run(eff).getOrThrow())
+
+  @Benchmark def zioFusedPar4(): Int =
+    val eff = StromZio.fusedPar(4)(zio.stream.ZStream.fromChunks(zioChunks*)
+      .map(_ * 3).filter(_ % 4 != 1).map(_ + 7).map(x => x ^ (x >>> 3)).filter(_ % 3 != 0).map(_ * 2).map(_ - 1))
+      .runSum
+    zio.Unsafe.unsafe(implicit u => zio.Runtime.default.unsafe.run(eff).getOrThrow())
+
   @Benchmark def fs2Plain(): Int =
     _root_.fs2.Stream.emits(fs2Chunks).flatMap(_root_.fs2.Stream.chunk).covary[IO]
       .map(_ * 3).filter(_ % 4 != 1).map(_ + 7).map(x => x ^ (x >>> 3)).filter(_ % 3 != 0).map(_ * 2).map(_ - 1)

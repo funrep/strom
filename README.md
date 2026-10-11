@@ -127,20 +127,29 @@ JMH, Apple M1 (4 performance + 4 efficiency cores), JDK 23. **Lower is better.**
 |---|---|---|
 | hand-written `while` loop | 4.6 / 0 | — |
 | `Strom.run` | 4.7 / 0 | 3.3 / 0 |
-| **fs2 code in `StromFs2.fused`** | **6.2 / 1.4** | **8.3 / 36** |
-| plain fs2 | 52 / 108 | 825 / 3269 |
-| plain ZStream | 31 / 147 | 641 / 1519 |
+| **fs2 code in `StromFs2.fused`** | **5.9 / 1.4** | **7.6 / 36** |
+| fs2 code in `StromFs2.fusedPar(4)` | 2.9 / 5.6 | 17.5 / 79 |
+| plain fs2 | 51 / 108 | 804 / 3269 |
+| **ZStream code in `StromZio.fused`** | **9.5 / 20** | **17.7 / 70** |
+| ZStream code in `StromZio.fusedPar(4)` | 4.0 / 25 | 15.8 / 134 |
+| plain ZStream | 31 / 147 | 632 / 1525 |
 
-Fused code is within ~1.5 ns of a hand-written loop. The gain applies to time spent in stream
-machinery: big for CPU-heavy pipelines, small for I/O-bound ones.
+* Fused fs2 code is within ~1.5 ns of a hand-written loop: ~8× and ~100× faster than plain fs2.
+* Fused ZStream code is ~3× and ~35× faster than plain ZStream. It's slower than fs2 here
+  because the benchmark ends in `runSum`, a ZIO sink that isn't fused (it boxes each element).
+* `fusedPar(4)` doubles the speed of the simple pipeline. On the zip pipeline it loses for
+  fs2: the zip with another stream splits the work into three runs, and the parallel part (a
+  cheap `flatMap`) doesn't pay for the extra hand-offs.
+* The gain applies to time spent in stream machinery: big for CPU-heavy pipelines, small for
+  I/O-bound ones.
 
 **Scaling** (ns per element, ~20 ops per element; one thread without any executor: 7.7):
 
 | workers | 1 | 2 | 4 | 8 |
 |---|---|---|---|---|
 | loom | 8.8 | 4.5 | 2.5 | 2.0 |
-| fs2 `fusedPar` | 8.6 | 4.8 | 2.9 | 2.8 |
-| fs2 `fusedPar` + fold (partial folds) | 7.5 | 4.2 | 2.6 | 2.2 |
+| fs2 `fusedPar` | 8.6 | 4.8 | 2.9 | 2.9 |
+| fs2 `fusedPar` + fold (partial folds) | 7.6 | 3.8 | 2.7 | 2.3 |
 | ZIO `fusedPar` | 8.6 | 4.7 | 3.0 | 3.1 |
 
 Near-linear up to 4 workers (~3×); the M1's other 4 cores are slower efficiency cores, so 8

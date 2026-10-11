@@ -182,6 +182,10 @@ abstract class ChainFuser(using val q: Quotes):
       case _ => true
     })
 
+  private def trivialInner(t: Term): Boolean =
+    val (src, calls) = chain(t)
+    calls.isEmpty && !source(src).exists(_.isInstanceOf[Pipe.SrcRange])
+
   private def op(c: Call): Option[PureOp] = pureOp(c).filter {
     case PureOp.FlatMap(f) => lambda1(f).exists((_, body) => pureInner(body))
     case _ => true
@@ -197,8 +201,9 @@ abstract class ChainFuser(using val q: Quotes):
     var calls = Vector.empty[Call]
     var names = Vector.empty[String]
     var fold: Option[Pipe.Sink] = None
-    def worth: Boolean =
-      names.size >= 2 || inputs.isEmpty || names.exists(n => n == "flatMap" || n == "zipWith" || n == "fold")
+    /** Has an operator worth a segment boundary on its own. */
+    var heavy = pipe.isInstanceOf[Pipe.SrcRange]
+    def worth: Boolean = names.size >= 2 || heavy
 
   def fuse(e: Expr[Any]): Expr[Any] = fuse(e.asTerm).asExpr
 
@@ -317,6 +322,11 @@ abstract class ChainFuser(using val q: Quotes):
   private def add(r: Run, c: Call, o: PureOp): Unit =
     r.calls :+= c
     r.names :+= name(o)
+    r.heavy ||= (o match
+      case _: PureOp.ZipWith | _: PureOp.Fold => true
+      // a flatMap that only flattens a collection or chunk gains nothing from fusion
+      case PureOp.FlatMap(f) => lambda1(f).exists((_, body) => !trivialInner(body))
+      case _ => false)
     ((elemOf(c.qual.tpe).asType, elemOf(c.term.tpe).asType): @unchecked) match
       case ('[a], '[b]) =>
         val up = r.pipe.asInstanceOf[Pipe[a]]

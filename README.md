@@ -126,8 +126,7 @@ which calls are pure operators and how to run a segment.
 
 ## Relation to strymonas
 
-Ström follows Kiselyov et al.'s strymonas (POPL 2017, and the later normalization-by-evaluation
-version). From the later version it adopts:
+Ström follows strymonas [1, 2]. From the later normalization-by-evaluation version [2] it adopts:
 * zipping by driving with the complex side and linearising only the simple one;
 * elements as staging-time values, so tuples never exist at runtime unless they escape;
 * `map_accum_filter` as the general stateful operator.
@@ -286,6 +285,18 @@ request or I/O callback would see.
   a tuple that escapes (emitted, folded, stored across a pull or `flatMap`) is still allocated.
 * `collect` is staged as a `match` only for partial-function literals; others go through
   `isDefinedAt` / `apply`.
+
+## References
+
+1. Oleg Kiselyov, Aggelos Biboudis, Nick Palladinos, Yannis Smaragdakis. *Stream Fusion, to
+   Completeness*. POPL 2017. [doi:10.1145/3009837](https://doi.org/10.1145/3009837)
+2. The later strymonas paper: a theory of stateful streams, with fusion by normalization-by-evaluation,
+   linear normal forms for zip, closure conversion of nested streams, and the equational laws
+   proved in Agda. Implementation, derivations and proofs:
+   [github.com/strymonas/strymonas-ocaml](https://github.com/strymonas/strymonas-ocaml)
+   (`lib/derivation.ml`, `lib/Derivation.agda`, `lib/intuition.ml`).
+3. Tomoaki Kobayashi, Oleg Kiselyov. *Complete Stream Fusion for Software-Defined Radio*.
+   PEPM 2024. [doi:10.1145/3635800.3636962](https://doi.org/10.1145/3635800.3636962)
 
 ## License
 

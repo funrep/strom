@@ -202,12 +202,12 @@ pipeline on the same data. Pipeline A: `map`/`filter` ×7 then sum. Pipeline B:
 | Row | Fused? | A | B |
 |---|---|---|---|
 | hand-written `while` loop (no library: the floor) | — | 4.6 / 0 | 3.0 / 0 |
-| `Strom.run` over arrays (Ström DSL) | yes | 4.7 / 0 | 3.2 / 0 |
-| plain fs2 code (the baseline) | no | 51 / 108 | 804 / 3269 |
-| **same fs2 code + `.fused`** | yes | **5.9 / 1.4** | **8.8 / 36** |
-| same fs2 code + `.fusedPar(4)` | yes, 4 cores | 2.9 / 5.6 | 18.7 / 80 |
-| plain ZStream code (the baseline) | no | 31 / 147 | 632 / 1525 |
-| **same ZStream code + `.fused`** | yes | **9.5 / 20** | **18.8 / 70** |
+| `Strom.run` over arrays (Ström DSL) | yes | 4.6 / 0 | 3.3 / 0 |
+| plain fs2 code (the baseline) | no | 52 / 108 | 860 / 3269 |
+| **same fs2 code + `.fused`** | yes | **5.8 / 1.4** | **8.8 / 36** |
+| same fs2 code + `.fusedPar(4)` | yes, 4 cores | 3.2 / 6.8 | 18.7 / 80 |
+| plain ZStream code (the baseline) | no | 31 / 147 | 633 / 1523 |
+| **same ZStream code + `.fused`** | yes | **9.3 / 20** | **18.8 / 70** |
 | same ZStream code + `.fusedPar(4)` | yes, 4 cores | 4.0 / 25 | 16.3 / 136 |
 
 * Fused fs2 code is within ~1.5 ns (A) and ~6 ns (B) of a hand-written loop: ~8× and ~100×
@@ -216,7 +216,7 @@ pipeline on the same data. Pipeline A: `map`/`filter` ×7 then sum. Pipeline B:
   effects run as in plain code.
 * Fused ZStream code is ~3× and ~35× faster than plain ZStream. It's slower than fs2 here
   because the benchmark ends in `runSum`, a ZIO sink that isn't fused (it boxes each element).
-* `fusedPar(4)` doubles the speed of the simple pipeline. On the zip pipeline it loses for
+* `fusedPar(4)` almost doubles the speed of the simple pipeline. On the zip pipeline it loses for
   fs2: the zip with another stream splits the work into three runs, and the parallel part (a
   cheap `flatMap`) doesn't pay for the extra hand-offs.
 * The gain applies to time spent in stream machinery: big for CPU-heavy pipelines, small for
@@ -226,10 +226,10 @@ pipeline on the same data. Pipeline A: `map`/`filter` ×7 then sum. Pipeline B:
 
 | workers | 1 | 2 | 4 | 8 |
 |---|---|---|---|---|
-| loom | 8.8 | 4.5 | 2.5 | 2.0 |
-| fs2 `fusedPar` | 8.6 | 4.8 | 2.9 | 2.9 |
-| fs2 `fusedPar` + fold (partial folds) | 7.6 | 3.8 | 2.7 | 2.3 |
-| ZIO `fusedPar` | 8.6 | 4.7 | 3.0 | 3.1 |
+| loom | 8.7 | 4.5 | 2.7 | 2.1 |
+| fs2 `fusedPar` | 8.7 | 4.9 | 3.0 | 2.8 |
+| fs2 `fusedPar` + fold (partial folds) | 7.6 | 3.9 | 2.7 | 2.3 |
+| ZIO `fusedPar` | 8.5 | 4.6 | 3.1 | 3.1 |
 
 Near-linear up to 4 workers (~3×); the M1's other 4 cores are slower efficiency cores, so 8
 adds little. Partial folds scale best of the stream executors: only one small result per chunk

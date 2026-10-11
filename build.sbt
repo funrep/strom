@@ -1,6 +1,6 @@
 ThisBuild / scalaVersion := "3.9.0"
 ThisBuild / organization := "io.github.funrep"
-// Versions come from git tags (sbt-dynver, via sbt-ci-release): tag `v0.1.0` to release 0.1.0.
+// Versions come from git tags (sbt-dynver, via sbt-ci-release).
 ThisBuild / homepage     := Some(url("https://github.com/funrep/strom"))
 ThisBuild / scmInfo      := Some(ScmInfo(url("https://github.com/funrep/strom"), "scm:git@github.com:funrep/strom.git"))
 ThisBuild / developers   := List(Developer("funrep", "Karl-Oskar Rikås", "2212965+funrep@users.noreply.github.com", url("https://github.com/funrep")))

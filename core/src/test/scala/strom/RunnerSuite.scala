@@ -25,7 +25,7 @@ class RunnerSuite extends munit.FunSuite:
     (out.result(), yields)
 
   test("runner drives an emitting segment") {
-    val f = Strom.segment2(Pipelines.representativeEmit(1000))
+    val f = Strom.segment(Pipelines.representativeEmit(1000))
     val r = Random(3)
     for _ <- 0 until 200 do
       val a = Array.fill(r.nextInt(50))(r.nextInt(10)); val b = Array.fill(r.nextInt(80))(r.nextInt(10))
@@ -34,7 +34,7 @@ class RunnerSuite extends munit.FunSuite:
   }
 
   test("runner reports Yield on budget exhaustion and the fold result on Done") {
-    val f = Strom.foldSegment((a: Strom[Int]) => a.flatMap(x => Strom.range(0, x)).filter(_ % 1000 == 0).count)
+    val f = Strom.segment((a: Strom[Int]) => a.flatMap(x => Strom.range(0, x)).filter(_ % 1000 == 0).count)
     val run = Runner(f, budget = 100, sliceNanos = 0) // yield at every budget boundary
     val (_, yields) = driveAll(run, Vector(Array(100_000)), 1)
     assertEquals(run.result, 100L)
@@ -42,7 +42,7 @@ class RunnerSuite extends munit.FunSuite:
   }
 
   test("with a time slice, yields are rare") {
-    val f = Strom.foldSegment((a: Strom[Int]) => a.flatMap(x => Strom.range(0, x)).filter(_ % 1000 == 0).count)
+    val f = Strom.segment((a: Strom[Int]) => a.flatMap(x => Strom.range(0, x)).filter(_ % 1000 == 0).count)
     val run = Runner(f, budget = 100, sliceNanos = 10_000_000_000L) // 10 s: effectively never
     val (_, yields) = driveAll(run, Vector(Array(100_000)), 1)
     assertEquals(run.result, 100L)

@@ -19,7 +19,7 @@ class StromFs2Suite extends munit.FunSuite:
     s
 
   test("pipe2 (emit) agrees with the reference") {
-    val f = Strom.segment2(Pipelines.representativeEmit(40))
+    val f = Strom.segment(Pipelines.representativeEmit(40))
     val r = Random(1)
     for _ <- 0 until 100 do
       val a = Array.fill(r.nextInt(30))(r.nextInt(8)); val b = Array.fill(r.nextInt(60))(r.nextInt(9))
@@ -29,7 +29,7 @@ class StromFs2Suite extends munit.FunSuite:
   }
 
   test("fold2 agrees with the reference") {
-    val f = Strom.foldSegment2(Pipelines.representative(25))
+    val f = Strom.segment(Pipelines.representative(25))
     val r = Random(2)
     for _ <- 0 until 100 do
       val a = Array.fill(r.nextInt(30))(r.nextInt(8)); val b = Array.fill(r.nextInt(60))(r.nextInt(9))

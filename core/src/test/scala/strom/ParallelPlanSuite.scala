@@ -64,16 +64,16 @@ class ParallelPlanSuite extends munit.FunSuite:
   check("cut at take", Strom.parallel(p2), "Replicated,Single", xs => emits(p2(Strom.fromSeq(xs))))
 
   inline def p3 = (a: Strom[Int]) => a.map(_ * 3).filter(_ > 0).sum
-  check("associative sum: partial folds", Strom.parallelFold(p3), "PartialFold", xs => folds(p3(Strom.fromSeq(xs))))
+  check("associative sum: partial folds", Strom.parallel(p3), "PartialFold", xs => folds(p3(Strom.fromSeq(xs))))
 
   inline def p4 = (a: Strom[Int]) => a.filter(_ % 3 != 0).count
-  check("count: partial folds", Strom.parallelFold(p4), "PartialFold", xs => folds(p4(Strom.fromSeq(xs))))
+  check("count: partial folds", Strom.parallel(p4), "PartialFold", xs => folds(p4(Strom.fromSeq(xs))))
 
   inline def p5 = (a: Strom[Int]) => a.map(_ + 1).foldAssociative(1L)((s, x) => s * (x % 3 + 1))
-  check("associative fold with element ≠ result type: cut", Strom.parallelFold(p5), "Replicated,Single", xs => folds(p5(Strom.fromSeq(xs))))
+  check("associative fold with element ≠ result type: cut", Strom.parallel(p5), "Replicated,Single", xs => folds(p5(Strom.fromSeq(xs))))
 
   inline def p6 = (a: Strom[Int]) => a.map(_ * 2).fold(7)((s, x) => s * 31 + x)
-  check("non-associative fold: cut", Strom.parallelFold(p6), "Replicated,Single", xs => folds(p6(Strom.fromSeq(xs))))
+  check("non-associative fold: cut", Strom.parallel(p6), "Replicated,Single", xs => folds(p6(Strom.fromSeq(xs))))
 
   inline def p7 = (a: Strom[Int]) => a.take(9).map(_ * 2)
   check("stateful first: single", Strom.parallel(p7), "Single", xs => emits(p7(Strom.fromSeq(xs))))
@@ -90,7 +90,7 @@ class ParallelPlanSuite extends munit.FunSuite:
     xs => emits(p11(Strom.fromSeq(xs))))
 
   inline def p12 = (a: Strom[Int]) => a.map(_ + 1).take(50).flatMap(x => Strom.range(0, x % 5)).map(_ * 2).sum
-  check("multi-cut ending in a partial fold", Strom.parallelFold(p12), "Replicated,Single,PartialFold",
+  check("multi-cut ending in a partial fold", Strom.parallel(p12), "Replicated,Single,PartialFold",
     xs => folds(p12(Strom.fromSeq(xs))))
 
   inline def p13 = (a: Strom[Int]) => a.map(_ + 1).take(50).map(_ * 2).drop(3).filter(_ > 4).windowFold(2)(0)(_ + _)
@@ -112,5 +112,5 @@ class ParallelPlanSuite extends munit.FunSuite:
 
   test("plan descriptions") {
     println(Strom.parallel(p2))
-    println(Strom.parallelFold(p3))
+    println(Strom.parallel(p3))
   }

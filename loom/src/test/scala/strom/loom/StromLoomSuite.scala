@@ -31,7 +31,7 @@ class StromLoomSuite extends munit.FunSuite:
     (out.result(), result)
 
   test("two-input segment on a virtual thread agrees with the reference") {
-    val f = Strom.segment2(Pipelines.representativeEmit(30))
+    val f = Strom.segment(Pipelines.representativeEmit(30))
     val r = Random(9)
     for _ <- 0 until 50 do
       val a = Array.fill(r.nextInt(30))(r.nextInt(8)); val b = Array.fill(r.nextInt(60))(r.nextInt(9))
@@ -42,7 +42,7 @@ class StromLoomSuite extends munit.FunSuite:
 
   test("interrupting a busy segment stops it") {
     // An input whose expansion is effectively endless and filtered out: the segment only yields.
-    val f = Strom.foldSegment((a: Strom[Int]) => a.flatMap(x => Strom.range(0, x)).filter(_ < 0).count)
+    val f = Strom.segment((a: Strom[Int]) => a.flatMap(x => Strom.range(0, x)).filter(_ < 0).count)
     val in = ArrayBlockingQueue[Msg](1)
     in.put(Data(Array(Int.MaxValue), 0, 1))
     val t = StromLoom.start(f, Vector(in), ArrayBlockingQueue[Msg](1), budget = 1000)

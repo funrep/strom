@@ -33,7 +33,7 @@ class Fs2ParallelSuite extends munit.FunSuite:
   def input(r: Random) = Array.fill(r.nextInt(2000))(r.nextInt(50) - 5)
 
   test("replicated, cut, partial fold, single fold") {
-    val (p1, p2, p3, p4) = (Strom.parallel(stateless), Strom.parallel(cut), Strom.parallelFold(partial), Strom.parallelFold(nonAssoc))
+    val (p1, p2, p3, p4) = (Strom.parallel(stateless), Strom.parallel(cut), Strom.parallel(partial), Strom.parallel(nonAssoc))
     val r = Random(1)
     for _ <- 0 until 40 do
       val xs = input(r); val n = 1 + r.nextInt(6); val s = Strom.fromSeq(xs.toSeq)
@@ -44,7 +44,7 @@ class Fs2ParallelSuite extends munit.FunSuite:
   }
 
   test("multi-cut plans") {
-    val (pm, pf) = (Strom.parallel(multi), Strom.parallelFold(multiFold)); val r = Random(8)
+    val (pm, pf) = (Strom.parallel(multi), Strom.parallel(multiFold)); val r = Random(8)
     for _ <- 0 until 40 do
       val xs = input(r); val n = 1 + r.nextInt(6); val s = Strom.fromSeq(xs.toSeq)
       assertEquals(run(pm, xs, r, n), Reference.toList(multi(s)))
@@ -62,5 +62,5 @@ class Fs2ParallelSuite extends munit.FunSuite:
   }
 
   test("empty input") {
-    assertEquals(run(Strom.parallelFold(partial), Array.empty, Random(3), 2), List(0))
+    assertEquals(run(Strom.parallel(partial), Array.empty, Random(3), 2), List(0))
   }

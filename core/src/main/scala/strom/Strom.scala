@@ -2,7 +2,7 @@ package strom
 
 import strom.runtime.{DirectFrame, ParallelPlan, SegmentFactory}
 
-/** A fusible stream description.
+/** A fusible stream description: the lower-level API under `StromFs2.fused` / `StromZio.fused`.
  *
  *  `Strom` values are ordinary immutable trees, so the same expression can be run by the naive
  *  [[Reference]] interpreter. The staged entry points ([[Strom.run]], [[Strom.segment]], …) never
@@ -55,7 +55,7 @@ object Strom:
   /** Integers `from until until`. */
   def range(from: Int, until: Int): Strom[Int] = Node.RangeN(from, until)
   /** Reference-interpreter-only source (not stageable). */
-  def fromSeq[A](xs: Seq[A]): Strom[A] = Node.SeqN(xs)
+  private[strom] def fromSeq[A](xs: Seq[A]): Strom[A] = Node.SeqN(xs)
 
   private[strom] object Node:
     final case class ArrayN[A](array: Array[A]) extends Strom[A]
@@ -81,30 +81,31 @@ object Strom:
   /** Compiles a pipeline over arrays/ranges into a single fused loop and runs it. */
   inline def run[R](inline fold: Fold[R]): R = ${ internal.Macros.run[R]('fold) }
 
-  /** Compiles a one-input pipeline into a resumable segment emitting `B`s. */
-  inline def segment[A, B](inline f: Strom[A] => Strom[B]): SegmentFactory[B] =
-    ${ internal.Macros.segment[B]('f) }
-  /** Compiles a two-input pipeline into a resumable segment emitting `C`s. */
-  inline def segment2[A, B, C](inline f: (Strom[A], Strom[B]) => Strom[C]): SegmentFactory[C] =
-    ${ internal.Macros.segment[C]('f) }
-  /** Compiles a one-input fold into a resumable segment whose `result` is an `R`. */
-  inline def foldSegment[A, R](inline f: Strom[A] => Fold[R]): SegmentFactory[R] =
-    ${ internal.Macros.segment[R]('f) }
-  /** Compiles a two-input fold into a resumable segment whose `result` is an `R`. */
-  inline def foldSegment2[A, B, R](inline f: (Strom[A], Strom[B]) => Fold[R]): SegmentFactory[R] =
-    ${ internal.Macros.segment[R]('f) }
+  /** Compiles a pipeline lambda into a resumable segment. Its parameters (1 to 4, with explicit
+   *  types, e.g. `(a: Strom[Int], b: Strom[Long]) => …`) become input ports; a `Strom[B]` result
+   *  gives a `SegmentFactory[B]` emitting `B`s, a `Fold[R]` result one whose `result` is an `R`. */
+  inline def segment[A, R](inline f: Strom[A] => R): SegmentFactory[ResultOf[R]] = ${ internal.Macros.segmentOf[R]('f) }
+  inline def segment[A, B, R](inline f: (Strom[A], Strom[B]) => R): SegmentFactory[ResultOf[R]] =
+    ${ internal.Macros.segmentOf[R]('f) }
+  inline def segment[A, B, C, R](inline f: (Strom[A], Strom[B], Strom[C]) => R): SegmentFactory[ResultOf[R]] =
+    ${ internal.Macros.segmentOf[R]('f) }
+  inline def segment[A, B, C, D, R](inline f: (Strom[A], Strom[B], Strom[C], Strom[D]) => R): SegmentFactory[ResultOf[R]] =
+    ${ internal.Macros.segmentOf[R]('f) }
 
-  /** A parallel execution plan for a one-input pipeline (see [[strom.runtime.ParallelPlan]]):
-   *  its stateless prefix is replicated, the rest runs as a single instance. */
-  inline def parallel[A, B](inline f: Strom[A] => Strom[B]): ParallelPlan[B] =
-    ${ internal.Macros.parallel[B]('f) }
-  /** As [[parallel]] for a fold; an associative fold runs as per-chunk partial folds. */
-  inline def parallelFold[A, R](inline f: Strom[A] => Fold[R]): ParallelPlan[R] =
-    ${ internal.Macros.parallel[R]('f) }
+  /** A parallel execution plan for a one-input pipeline lambda (see
+   *  [[strom.runtime.ParallelPlan]]): stateless parts are replicated, stateful ones run as single
+   *  instances, an associative fold runs as per-chunk partial folds. */
+  inline def parallel[A, R](inline f: Strom[A] => R): ParallelPlan[ResultOf[R]] = ${ internal.Macros.parallelOf[R]('f) }
+
   /** A stateful pipeline run as one instance per partition; `key` routes elements so that all
    *  elements with the same key reach the same instance, in order. */
   inline def parallelKeyed[A, B](inline key: A => Int)(inline f: Strom[A] => Strom[B]): ParallelPlan[B] =
     ${ internal.Macros.parallelKeyed[B]('f, 'key) }
+
+  /** `Strom[B]` → `B` (emitted elements), `Fold[R]` → `R` (the fold's result). */
+  type ResultOf[R] = R match
+    case Strom[b] => b
+    case Fold[r]  => r
 
   /** The generated code (`Expr.show`) for a pipeline, as a compile-time constant.
    *  Accepts a [[Fold]] (direct mode) or a lambda with explicitly typed `Strom` parameters

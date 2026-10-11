@@ -17,7 +17,7 @@ class AllocationSuite extends munit.FunSuite:
   val b = Array.tabulate(1 << 20)(i => i % 7)
 
   test("segment: no per-element allocation") {
-    val f = Strom.foldSegment2(Pipelines.representative(Int.MaxValue))
+    val f = Strom.segment(Pipelines.representative(Int.MaxValue))
     def runOnce(): Any =
       val seg = f.create(maxOut = 256, budget = 4096)
       var pa = 0; var pb = 0; var st = seg.step()

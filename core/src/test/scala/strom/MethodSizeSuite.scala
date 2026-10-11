@@ -3,7 +3,7 @@ package strom
 import scala.util.Random
 
 class MethodSizeSuite extends munit.FunSuite:
-  val huge = Strom.segment2(Huge.pipeline)
+  val huge = Strom.segment(Huge.pipeline)
 
   test("no generated method exceeds HotSpot's 8000-byte JIT limit") {
     val sizes = ClassFiles.all(ClassFiles.testClassesDir).filter(m => m.name == "stepImpl" || m.name.startsWith("part") || m.name == "runImpl")

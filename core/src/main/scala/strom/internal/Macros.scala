@@ -15,11 +15,6 @@ object Macros:
       case fs: Pipe.FoldSink[?, ?] => guarded(Codegen.direct(fs).asExprOf[R])
       case _ => quotes.reflect.report.errorAndAbort("Strom.run expects a fold")
 
-  def segment[O: Type](f: Expr[Any])(using Quotes): Expr[SegmentFactory[O]] =
-    Frontend().segmentLambda(f) match
-      case Some((ports, sink)) => guarded(Codegen.segment[O](sink, ports))
-      case None => quotes.reflect.report.errorAndAbort("strom: expected a lambda literal")
-
   private def sinkType(sink: Pipe.Sink): Type[?] = sink match
     case fs: Pipe.FoldSink[?, ?] => fs.tpe
     case es: Pipe.EmitSink[?]    => es.tpe
@@ -45,7 +40,6 @@ object Macros:
       case None => Codegen.explain(Frontend().parseSink(p), Nil)
     Expr(text)
 
-  def parallel[O: Type](f: Expr[Any])(using Quotes): Expr[strom.runtime.ParallelPlan[O]] = parallelPlan[O](f, None)
   def parallelKeyed[O: Type](f: Expr[Any], key: Expr[Any])(using Quotes): Expr[strom.runtime.ParallelPlan[O]] =
     parallelPlan[O](f, Some(key))
 
@@ -54,3 +48,18 @@ object Macros:
     front.segmentLambda(f) match
       case Some((ports, sink)) => guarded(Parallel.plan[O](sink, ports, key, front))
       case None => quotes.reflect.report.errorAndAbort("strom: expected a lambda literal")
+
+  def segmentOf[R: Type](f: Expr[Any])(using Quotes): Expr[strom.runtime.SegmentFactory[strom.Strom.ResultOf[R]]] =
+    Frontend().segmentLambda(f) match
+      case Some((ports, sink)) => sinkType(sink) match
+        case '[o] => guarded(Codegen.segment[o](sink, ports))
+          .asInstanceOf[Expr[strom.runtime.SegmentFactory[strom.Strom.ResultOf[R]]]]
+      case None => quotes.reflect.report.errorAndAbort("strom: expected a lambda literal with typed Strom parameters")
+
+  def parallelOf[R: Type](f: Expr[Any])(using Quotes): Expr[strom.runtime.ParallelPlan[strom.Strom.ResultOf[R]]] =
+    val front = Frontend()
+    front.segmentLambda(f) match
+      case Some((ports, sink)) => sinkType(sink) match
+        case '[o] => guarded(Parallel.plan[o](sink, ports, None, front))
+          .asInstanceOf[Expr[strom.runtime.ParallelPlan[strom.Strom.ResultOf[R]]]]
+      case None => quotes.reflect.report.errorAndAbort("strom: expected a lambda literal with a typed Strom parameter")

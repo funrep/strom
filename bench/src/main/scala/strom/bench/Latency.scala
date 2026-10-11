@@ -18,7 +18,7 @@ object Latency extends IOApp:
   val cores = Runtime.getRuntime.availableProcessors()
   val input: Array[Int] = Array.fill(64)(2_000_000) // each element expands to 2M inner elements
 
-  val seg = Strom.foldSegment((a: Strom[Int]) =>
+  val seg = Strom.segment((a: Strom[Int]) =>
     a.flatMap(x => Strom.range(0, x)).map(y => (y * 31) ^ (y >>> 3)).filter(_ % 7 != 0).count)
 
   def segmentLoad(budget: Int): IO[Long] =

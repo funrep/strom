@@ -33,7 +33,7 @@ class ZioParallelSuite extends munit.FunSuite:
 
   test("replicated, cut, partial fold, single fold, multi-cut") {
     val (p1, p2, p3, p4, p5) =
-      (Strom.parallel(stateless), Strom.parallel(cut), Strom.parallelFold(partial), Strom.parallelFold(nonAssoc), Strom.parallel(multi))
+      (Strom.parallel(stateless), Strom.parallel(cut), Strom.parallel(partial), Strom.parallel(nonAssoc), Strom.parallel(multi))
     val r = Random(1)
     for _ <- 0 until 30 do
       val xs = input(r); val n = 1 + r.nextInt(6); val s = Strom.fromSeq(xs.toSeq)
@@ -55,5 +55,5 @@ class ZioParallelSuite extends munit.FunSuite:
   }
 
   test("empty input") {
-    assertEquals(run(Strom.parallelFold(partial), Array.empty, Random(3), 2), List(0))
+    assertEquals(run(Strom.parallel(partial), Array.empty, Random(3), 2), List(0))
   }

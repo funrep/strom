@@ -22,7 +22,7 @@ class StromZioSuite extends munit.FunSuite:
 
   test("fold agrees with the reference") {
     val r = Random(6)
-    val f = Strom.foldSegment(Pipelines.longSum)
+    val f = Strom.segment(Pipelines.longSum)
     for _ <- 0 until 100 do
       val xs = Array.fill(r.nextInt(40))(r.nextInt(30) - 10)
       assertEquals(unsafeRun(StromZio.runFold[Any, Nothing, Int, Long](f, 1 + r.nextInt(9))(chunked(xs, r))),

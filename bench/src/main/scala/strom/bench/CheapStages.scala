@@ -25,7 +25,7 @@ class CheapStages:
   val chunks: Vector[Array[Int]] = data.grouped(ChunkSize).toVector
   val fs2Chunks: Vector[_root_.fs2.Chunk[Int]] = chunks.map(_root_.fs2.Chunk.array(_))
   val zioChunks: Vector[zio.Chunk[Int]] = chunks.map(zio.Chunk.fromArray(_))
-  val segment = Strom.foldSegment((a: Strom[Int]) => stages(a))
+  val segment = Strom.segment((a: Strom[Int]) => stages(a))
 
   inline def stages(s: Strom[Int]) =
     s.map(_ * 3).filter(_ % 4 != 1).map(_ + 7).map(x => x ^ (x >>> 3)).filter(_ % 3 != 0).map(_ * 2).map(_ - 1).sum

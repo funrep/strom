@@ -1,30 +1,26 @@
 # Ström
 
-Guaranteed, allocation-free stream fusion for Scala 3, by staging (quotes), after Kiselyov,
-Biboudis, Palladinos and Smaragdakis, *Stream Fusion, to Completeness* (POPL 2017).
-
-A pipeline written with the `Strom` DSL is compiled **at compile time** into loops: either one
-fused loop over arrays (`Strom.run`) or a **resumable, chunk-driven segment** that a
-runtime-agnostic, sans-I/O runner drives one bounded step at a time.
+A bolt-on for **fs2** and **ZIO Streams** codebases: wrap an ordinary stream expression and its
+pure operators are fused, **at compile time**, into allocation-free loops, while effects and
+everything else run exactly as before. Built on staging (Scala 3 quotes) and Kiselyov et al.'s
+strymonas ([References](#references)).
 
 ```scala
-import strom.Strom
+import strom.fs2.StromFs2
 
-// Direct: one fused loop, no allocation at all.
-val r: Int = Strom.run {
-  Strom.fromArray(a).flatMap(x => Strom.range(0, x))
-    .zipWith(Strom.fromArray(b).filter(_ % 2 == 0))(_ * _)
-    .take(n).sum
+val total: Stream[IO, Long] = StromFs2.fused {
+  requests
+    .map(parse).filter(_.status >= 500)     // fused
+    .evalMap(logIt)                         // kept: an effect
+    .map(_.latencyMs).fold(0L)(_ + _)       // fused
 }
 
-// Resumable segment with two input ports, driven by fs2:
-val seg = Strom.foldSegment2((a: Strom[Int], b: Strom[Int]) =>
-  a.flatMap(x => Strom.range(0, x)).zipWith(b.filter(_ % 2 == 0))(_ * _).take(n).sum)
-val out: Stream[IO, Int] = StromFs2.fold2[IO, Int, Int, Int](seg)(as, bs)
-
-Strom.showCode(...)   // the generated code, as a compile-time string
-Strom.explain(...)    // stage metadata and the Kiselyov IR shape
+StromFs2.fusedPlan(...)  // compile-time report: "fused: map → filter … / kept: evalMap"
 ```
+
+Same for ZIO with `StromZio.fused { … }`. No rewrite into a new DSL; results are identical to the
+unfused code. Typical gains: ~8× on simple map/filter chains, ~100× on nested/zip pipelines, with
+~1 byte of garbage per element instead of 100+ (see [Numbers](#numbers)).
 
 ## Install
 
@@ -40,6 +36,59 @@ libraryDependencies += "io.github.funrep" %% "strom-fs2" % "<version printed by 
 
 Scala 3.9, JDK 21+. CI runs `sbt test` on every push (`.github/workflows/ci.yml`); pushing a tag
 `vX.Y.Z` publishes to Maven Central (`release.yml`, once the Sonatype/PGP secrets are configured).
+
+## Fusing plain fs2 / ZIO code
+
+You don't have to rewrite anything in the `Strom` DSL. Wrap an ordinary stream expression:
+
+```scala
+StromFs2.fused {
+  in.map(_ * 3).filter(_ % 2 == 0).evalMap(save).map(_ + 1).take(100L).fold(0)(_ + _)
+}
+StromZio.fused { in.map(f).filter(p).mapZIO(save).map(g) }
+```
+
+Each maximal run of pure operators becomes one compiled segment. Everything else (effects,
+time, concurrency, operators it doesn't know) is kept exactly as written, between the runs.
+`StromFs2.fusedPlan(…)` / `StromZio.fusedPlan(…)` return what was fused and which operators were
+kept, as a compile-time string. Calls through cats syntax (`mapFilter`), extension methods and
+default arguments (`takeWhile(p)`) are recognised. `examples/` is a standalone project that uses
+the published artifacts on realistic fs2 / ZIO pipelines.
+
+| | fs2 | ZIO |
+|---|---|---|
+| fused operators | `map`, `filter`, `collect`, `mapFilter` (cats syntax), `take`, `drop`, `takeWhile`, `dropWhile`, `zipWithIndex`, `scan`, `mapAccumulate`, `fold`, `zip`, `zipWith`, `flatMap` onto `Stream.range` | `map`, `filter`, `collect`, `take`, `drop`, `takeWhile`, `dropWhile`, `zipWithIndex`, `scan`, `mapAccum`, `zipWith`, `flatMap` onto `ZStream.range` |
+| inputs per run | up to 4 (`zipWith`; a pure `zipWith` operand is inlined instead) | up to 4 |
+| yields to the scheduler | `cede` when a `Spawn[F]` exists (not for `Pure`) | `yieldNow` |
+
+A run must be worth a segment boundary: two or more operators, or a `flatMap`, `zipWith` or `fold`.
+The library-independent part lives in `strom.internal.ChainFuser`; each adapter only says
+which calls are pure operators and how to run a segment.
+
+## Lower-level API: the `Strom` DSL
+
+`fused` compiles through a small DSL, also usable directly, e.g. for array processing or to drive
+a segment by hand. Pipelines must be written inline (directly or via `inline def`).
+
+```scala
+import strom.Strom
+
+// One fused loop over arrays, no allocation at all.
+val r: Int = Strom.run {
+  Strom.fromArray(a).flatMap(x => Strom.range(0, x))
+    .zipWith(Strom.fromArray(b).filter(_ % 2 == 0))(_ * _)
+    .take(n).sum
+}
+
+// A resumable segment; its typed lambda parameters are input ports (1 to 4).
+val seg = Strom.segment((a: Strom[Int], b: Strom[Int]) =>
+  a.flatMap(x => Strom.range(0, x)).zipWith(b.filter(_ % 2 == 0))(_ * _).take(n).sum)
+val out: Stream[IO, Int] = StromFs2.fold2[IO, Int, Int, Int](seg)(as, bs)
+
+Strom.parallel((a: Strom[Int]) => …)   // a parallel plan (see below)
+Strom.showCode(…)                      // the generated code, as a compile-time string
+Strom.explain(…)                       // stage metadata and the Kiselyov IR shape
+```
 
 ## Guarantees
 
@@ -96,37 +145,9 @@ outlined into local `def`s. The compiler lifts these into separate methods, and 
 inside them are retargeted. Direct pipelines that are too large switch to field storage on a
 one-shot frame, so that outlined code does not capture (and box) locals.
 
-## Fusing plain fs2 / ZIO code
-
-You don't have to rewrite anything in the `Strom` DSL. Wrap an ordinary stream expression:
-
-```scala
-StromFs2.fused {
-  in.map(_ * 3).filter(_ % 2 == 0).evalMap(save).map(_ + 1).take(100L).fold(0)(_ + _)
-}
-StromZio.fused { in.map(f).filter(p).mapZIO(save).map(g) }
-```
-
-Each maximal run of pure operators becomes one compiled segment. Everything else (effects,
-time, concurrency, operators it doesn't know) is kept exactly as written, between the runs.
-`StromFs2.fusedPlan(…)` / `StromZio.fusedPlan(…)` return what was fused and which operators were
-kept, as a compile-time string. Calls through cats syntax (`mapFilter`), extension methods and
-default arguments (`takeWhile(p)`) are recognised. `examples/` is a standalone project that uses
-the published artifacts on realistic fs2 / ZIO pipelines.
-
-| | fs2 | ZIO |
-|---|---|---|
-| fused operators | `map`, `filter`, `collect`, `mapFilter` (cats syntax), `take`, `drop`, `takeWhile`, `dropWhile`, `zipWithIndex`, `scan`, `mapAccumulate`, `fold`, `zip`, `zipWith`, `flatMap` onto `Stream.range` | `map`, `filter`, `collect`, `take`, `drop`, `takeWhile`, `dropWhile`, `zipWithIndex`, `scan`, `mapAccum`, `zipWith`, `flatMap` onto `ZStream.range` |
-| inputs per run | up to 4 (`zipWith`; a pure `zipWith` operand is inlined instead) | up to 4 |
-| yields to the scheduler | `cede` when a `Spawn[F]` exists (not for `Pure`) | `yieldNow` |
-
-A run must be worth a segment boundary: two or more operators, or a `flatMap`, `zipWith` or `fold`.
-The library-independent part lives in `strom.internal.ChainFuser`; each adapter only says
-which calls are pure operators and how to run a segment.
-
 ## Parallel tier
 
-`Strom.parallel` / `parallelFold` / `parallelKeyed` compile a one-input pipeline into a
+`Strom.parallel` / `Strom.parallelKeyed` compile a one-input pipeline into a
 `ParallelPlan`, using the static metadata (stateless / associative / cardinality):
 
 | Pipeline shape | Plan |

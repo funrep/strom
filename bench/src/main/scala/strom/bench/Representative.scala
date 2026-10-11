@@ -25,7 +25,7 @@ class Representative:
   def fs2Of(xs: Array[Int]) = _root_.fs2.Stream.emits(xs.grouped(4096).toVector.map(_root_.fs2.Chunk.array(_)))
     .flatMap(_root_.fs2.Stream.chunk).covary[IO]
   def zioOf(xs: Array[Int]) = zio.stream.ZStream.fromChunks(xs.grouped(4096).toVector.map(zio.Chunk.fromArray(_))*)
-  val segment = Strom.foldSegment2(Pipelines.representative(N))
+  val segment = Strom.segment(Pipelines.representative(N))
 
   @Benchmark def stromDirect(): Int =
     Strom.run(Strom.fromArray(a).flatMap(x => Strom.range(0, x))

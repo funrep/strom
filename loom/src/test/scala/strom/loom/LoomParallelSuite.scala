@@ -64,21 +64,21 @@ class LoomParallelSuite extends munit.FunSuite:
   }
 
   test("partial folds combine in order") {
-    val plan = Strom.parallelFold(partial); val r = Random(3)
+    val plan = Strom.parallel(partial); val r = Random(3)
     for _ <- 0 until 60 do
       val xs = randomInput(r)
       assertEquals(runPlan(plan, xs, configs(r), r)._2, Some(Reference.run(partial(Strom.fromSeq(xs.toSeq)))))
   }
 
   test("non-associative fold runs as a single tier after the replicated prefix") {
-    val plan = Strom.parallelFold(nonAssoc); val r = Random(4)
+    val plan = Strom.parallel(nonAssoc); val r = Random(4)
     for _ <- 0 until 60 do
       val xs = randomInput(r)
       assertEquals(runPlan(plan, xs, configs(r), r)._2, Some(Reference.run(nonAssoc(Strom.fromSeq(xs.toSeq)))))
   }
 
   test("multi-cut plans") {
-    val (pm, pf) = (Strom.parallel(multi), Strom.parallelFold(multiFold)); val r = Random(8)
+    val (pm, pf) = (Strom.parallel(multi), Strom.parallel(multiFold)); val r = Random(8)
     assertEquals(pm.tiers.map(_.productPrefix), Vector("Replicated", "Single", "Replicated"))
     for _ <- 0 until 40 do
       val xs = randomInput(r); val s = Strom.fromSeq(xs.toSeq)
@@ -102,6 +102,6 @@ class LoomParallelSuite extends munit.FunSuite:
   }
 
   test("empty input") {
-    assertEquals(runPlan(Strom.parallelFold(partial), Array.empty, LoomParallel.Config(parallelism = 2), Random(7))._2, Some(0))
+    assertEquals(runPlan(Strom.parallel(partial), Array.empty, LoomParallel.Config(parallelism = 2), Random(7))._2, Some(0))
     assertEquals(runPlan(Strom.parallel(stateless), Array.empty, LoomParallel.Config(parallelism = 2), Random(7))._1, Nil)
   }

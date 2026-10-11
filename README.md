@@ -175,8 +175,13 @@ and `sbt "bench/runMain strom.bench.Latency"` (run on an idle machine).
 * **By design:** no effects inside fused code; no fan-out (each input is consumed once); only
   code the macro can see is fused (write pipelines inline; functions passed as values are
   called, not inlined). Unfused operators are simply kept as written.
-* At most 4 inputs per fused run, and a fixed pool of state slots per segment (a compile error
-  if exceeded).
+* **Inputs:** a fused run reads at most 4 streams: your stream plus each *effectful* stream
+  zipped into it (a pure operand like `Stream.range(…).map(f)` is built into the loop and
+  doesn't count). With `fused`, extra zips are simply left unfused; `Strom.segment` takes at most
+  4 parameters.
+* **State:** operator state (`take` counters, `scan` accumulators, `flatMap` positions, zip
+  bookkeeping) lives in a fixed pool of slots per segment, enough for roughly a hundred
+  operators in one chain. Running out is a compile error, never a runtime failure.
 * A tuple that leaves the fused code (emitted, folded) is allocated; tuples used only inside
   are not.
 * A `List` inside `flatMap` costs one iterator per element; ZIO `Chunk` reads may box.

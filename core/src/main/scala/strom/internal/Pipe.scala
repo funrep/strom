@@ -36,6 +36,16 @@ object Pipe:
   final case class ZipWithIndexP[A](up: Pipe[A])(using Type[(A, Long)]) extends Pipe[(A, Long)]
   final case class ScanP[A, S: Type](up: Pipe[A], z: Expr[S], op: Fn2[S, A, S]) extends Pipe[S]
   final case class DropP[A: Type](up: Pipe[A], n: Expr[Long]) extends Pipe[A]
+  /** How a `MapAccumP` step's result encodes the output. */
+  enum AccumOut:
+    /** `(S, Option[B])`: emit when defined. */
+    case OptionOut
+    /** `(S, B)`: always emit `B`. */
+    case AlwaysOut
+    /** `(S, B)`: always emit the pair `(S', B)` (fs2 `mapAccumulate`). */
+    case PairOut
+  final case class MapAccumP[A, S, B: Type](up: Pipe[A], z: Expr[S], f: Fn2[S, A, Any], out: AccumOut)(
+      using val stateTpe: Type[S]) extends Pipe[B]
   final case class TakeWhileP[A: Type](up: Pipe[A], p: Fn1[A, Boolean]) extends Pipe[A]
   final case class DropWhileP[A: Type](up: Pipe[A], p: Fn1[A, Boolean]) extends Pipe[A]
   final case class WindowFoldP[A, S: Type](up: Pipe[A], size: Expr[Int], z: Expr[S], op: Fn2[S, A, S])
@@ -73,6 +83,7 @@ object Pipe:
     case _: ZipWithIndexP[?]      => StageInfo("zipWithIndex", stateless = false, Cardinality.OneToOne)
     case _: ScanP[?, ?]           => StageInfo("scan", stateless = false, Cardinality.OneToOne)
     case _: DropP[?]              => StageInfo("drop", stateless = false, Cardinality.AtMostOne)
+    case _: MapAccumP[?, ?, ?]    => StageInfo("mapAccum", stateless = false, Cardinality.AtMostOne)
     case _: TakeWhileP[?]         => StageInfo("takeWhile", stateless = false, Cardinality.Bounded)
     case _: DropWhileP[?]         => StageInfo("dropWhile", stateless = false, Cardinality.AtMostOne)
 
@@ -99,6 +110,7 @@ object Pipe:
     case ZipWithIndexP(up) => up
     case ScanP(up, _, _) => up
     case DropP(up, _) => up
+    case m: MapAccumP[?, ?, ?] => m.up
     case TakeWhileP(up, _) => up
     case DropWhileP(up, _) => up
     case other => throw IllegalArgumentException(s"not a unary operator: $other")

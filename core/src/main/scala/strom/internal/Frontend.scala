@@ -111,6 +111,12 @@ final class Frontend(using val q: Quotes):
           case '{ ($s: Strom[a]).zipWithIndex } => Pipe.ZipWithIndexP[a](parse(s.asTerm, inner).asInstanceOf[Pipe[a]])
           case '{ ($s: Strom[a]).scan[st]($z)($op) } =>
             Pipe.ScanP[a, st](parse(s.asTerm, inner).asInstanceOf[Pipe[a]], z, fn2(op))
+          case '{ ($s: Strom[a]).mapAccumFilter[st, b]($z)($f) } =>
+            Pipe.MapAccumP[a, st, b](parse(s.asTerm, inner).asInstanceOf[Pipe[a]], z,
+              fn2(f).asInstanceOf[Pipe.Fn2[st, a, Any]], Pipe.AccumOut.OptionOut)
+          case '{ ($s: Strom[a]).mapAccum[st, b]($z)($f) } =>
+            Pipe.MapAccumP[a, st, b](parse(s.asTerm, inner).asInstanceOf[Pipe[a]], z,
+              fn2(f).asInstanceOf[Pipe.Fn2[st, a, Any]], Pipe.AccumOut.AlwaysOut)
           case '{ ($s: Strom[a]).drop($n) } => Pipe.DropP[a](parse(s.asTerm, inner).asInstanceOf[Pipe[a]], n)
           case '{ ($s: Strom[a]).takeWhile($p) } => Pipe.TakeWhileP[a](parse(s.asTerm, inner).asInstanceOf[Pipe[a]], fn1(p))
           case '{ ($s: Strom[a]).dropWhile($p) } => Pipe.DropWhileP[a](parse(s.asTerm, inner).asInstanceOf[Pipe[a]], fn1(p))

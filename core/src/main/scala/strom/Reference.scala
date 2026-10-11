@@ -18,6 +18,9 @@ object Reference:
     case MapFilterN(up, f)    => iterator(up).flatMap(f(_))
     case ZipWithIndexN(up)    => iterator(up).zipWithIndex.map((a, i) => (a, i.toLong))
     case ScanN(up, z, op)     => iterator(up).scanLeft(z)(op)
+    case MapAccumFilterN(up, z, f) =>
+      var st = z
+      iterator(up).flatMap { a => val (s2, o) = f(st, a); st = s2; o }
     case DropN(up, n)         => iterator(up).drop(math.min(math.max(n, 0L), Int.MaxValue).toInt)
     case TakeWhileN(up, p)    => iterator(up).takeWhile(p)
     case DropWhileN(up, p)    => iterator(up).dropWhile(p)

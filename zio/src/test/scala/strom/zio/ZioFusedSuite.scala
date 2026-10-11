@@ -38,6 +38,10 @@ class ZioFusedSuite extends munit.FunSuite:
     s => StromZio.fused(s.collect { case x if x % 2 == 0 => x * 3 }.zipWithIndex.map((x, i) => x + i.toInt).dropWhile(_ < 3)
       .scan(0L)(_ + _).drop(2).takeWhile(_ < 900L)))
 
+  same("mapAccum")(
+    s => s.mapAccum(0)((acc, x) => (acc + x, acc * 2)).filter(_ % 3 != 0),
+    s => StromZio.fused(s.mapAccum(0)((acc, x) => (acc + x, acc * 2)).filter(_ % 3 != 0)))
+
   same("zipWith another stream and range sources")(
     s => s.map(_ * 2).zipWith(ZStream.range(0, 1000).filter(_ % 3 == 0))(_ - _).take(40),
     s => StromZio.fused(s.map(_ * 2).zipWith(ZStream.range(0, 1000).filter(_ % 3 == 0))(_ - _).take(40)))

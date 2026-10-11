@@ -30,6 +30,7 @@ class StagedShapesSuite extends munit.FunSuite:
     case Drop(s: Shape, n: Int)
     case TakeWhile(s: Shape, p: Int)
     case DropWhile(s: Shape, p: Int)
+    case Accum(s: Shape)
 
   import Shape.*
 
@@ -68,6 +69,7 @@ class StagedShapesSuite extends munit.FunSuite:
     case Drop(u, n)       => reference(u, ports, x).drop(n.toLong)
     case TakeWhile(u, p)  => reference(u, ports, x).takeWhile(preds(p)._1)
     case DropWhile(u, p)  => reference(u, ports, x).dropWhile(preds(p)._1)
+    case Accum(u)         => reference(u, ports, x).mapAccumFilter(0)((acc, v) => if v % 2 == 0 then (acc + v, Some(acc)) else (acc - 1, None))
 
   def staged(s: Shape, x: Option[Expr[Int]])(using Quotes): Pipe[Int] = s match
     case Port(n)          => Pipe.SrcPort[Int](n)
@@ -89,6 +91,9 @@ class StagedShapesSuite extends munit.FunSuite:
     case Drop(u, n)       => Pipe.DropP[Int](staged(u, x), Expr(n.toLong))
     case TakeWhile(u, p)  => Pipe.TakeWhileP[Int](staged(u, x), Pipe.Fn1(e => preds(p)._2(e)))
     case DropWhile(u, p)  => Pipe.DropWhileP[Int](staged(u, x), Pipe.Fn1(e => preds(p)._2(e)))
+    case Accum(u)         => Pipe.MapAccumP[Int, Int, Int](staged(u, x), '{ 0 },
+                               Pipe.Fn2((acc, v) => '{ if ($v % 2 == 0) ($acc + $v, Some($acc)) else ($acc - 1, None) }),
+                               Pipe.AccumOut.OptionOut)
 
   // ------------------------------------------------------------------ generator
 
@@ -100,7 +105,7 @@ class StagedShapesSuite extends munit.FunSuite:
       case _        => sys.error("leaf with several ports")
     if depth == 0 && ports.size <= 1 then leaf(ports)
     else
-      val choice = if ports.size == 2 then 5 else r.nextInt(14)
+      val choice = if ports.size == 2 then 5 else r.nextInt(15)
       def again(ps: List[Int]) = gen(r, ps, math.max(depth - 1, 0), inner)
       choice match
         case 0 => Map(again(ports), r.nextInt(maps.size))
@@ -117,6 +122,7 @@ class StagedShapesSuite extends munit.FunSuite:
         case 9  => Indexed(again(ports))
         case 10 => Scan(again(ports))
         case 11 => Drop(again(ports), r.nextInt(6) - 1)
+        case 13 => Accum(again(ports))
         case 12 => if r.nextBoolean() then TakeWhile(again(ports), r.nextInt(preds.size)) else DropWhile(again(ports), r.nextInt(preds.size))
         case _ => if ports.size <= 1 then leaf(ports) else again(ports)
 

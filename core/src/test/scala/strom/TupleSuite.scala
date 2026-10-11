@@ -21,6 +21,12 @@ class TupleSuite extends munit.FunSuite:
     assert(!code.contains("Tuple2"), code)
   }
 
+  test("mapAccumFilter: no tuple / Option allocated for literal results") {
+    val code = Strom.showCode((s: Strom[Int]) =>
+      s.mapAccumFilter(0)((acc, x) => if x > 3 then (acc + x, Some(acc)) else (acc, None)))
+    assert(!code.contains("Tuple2") && !code.contains("Some"), code)
+  }
+
   test("a tuple that escapes is still built") {
     val code = Strom.showCode((s: Strom[Int]) => s.zipWithIndex)
     assert(code.contains("Tuple2"), code)

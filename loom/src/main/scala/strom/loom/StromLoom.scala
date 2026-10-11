@@ -56,5 +56,7 @@ object StromLoom:
                maxOut: Int = Segment.DefaultMaxOut, budget: Int = Segment.DefaultBudget): Thread =
     Thread.ofVirtual().name("strom-segment").start(() =>
       try run(f, inputs, output, maxOut, budget)
-      catch case _: InterruptedException => ()
+      catch
+        case _: InterruptedException => ()
+        case _: Throwable => () // already forwarded downstream as `Failed`
     )

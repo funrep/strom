@@ -58,3 +58,13 @@ object Pipelines:
   inline def zipScan = (a: Strom[Int], b: Strom[Int]) =>
     a.scan(0)(_ + _).zipWith(b.drop(3).zipWithIndex)((s, t) => s + t._1 + t._2.toInt)
 
+  // ---- Mealy machines
+  /** Run lengths of equal neighbours, emitted when the value changes (branches with Some / None). */
+  inline def runLengths = (a: Strom[Int]) =>
+    a.map(_ % 3).mapAccumFilter((-1, 0))((st, x) =>
+      if st._1 == x then ((x, st._2 + 1), None)
+      else ((x, 1), if st._1 < 0 then None else Some(st._2 * 10 + st._1)))
+  inline def runningMax = (a: Strom[Int]) => a.mapAccum(Int.MinValue)((m, x) => (m max x, m max x)).filter(_ % 2 == 0)
+  inline def accumInFlatMap = (a: Strom[Int]) =>
+    a.flatMap(x => Strom.range(0, x % 5).mapAccum(0)((s, y) => (s + y, s * x))).take(60)
+

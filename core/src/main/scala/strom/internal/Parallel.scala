@@ -44,6 +44,9 @@ object Parallel:
       case m: ScanP[a, s] =>
         given Type[s] = m.tpe
         ScanP[a, s](replace(m.up, target, repl).asInstanceOf[Pipe[a]], m.z, m.op)
+      case m: MapAccumP[a, s, b] =>
+        given Type[b] = m.tpe
+        MapAccumP[a, s, b](replace(m.up, target, repl).asInstanceOf[Pipe[a]], m.z, m.f, m.out)(using m.tpe, m.stateTpe)
       case m: DropP[a] =>
         given Type[a] = m.tpe
         DropP[a](replace(m.up, target, repl).asInstanceOf[Pipe[a]], m.n)

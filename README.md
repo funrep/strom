@@ -79,9 +79,15 @@ Two backends share the IR:
   fields"), so the loop nest can be left at any element boundary and re-entered from the top.
   It is used for zip/window operands (pulls) and for every loop of a resumable segment.
 
-Zip picks the cheapest correct strategy: a shared index for two indexed producers, lock-step
-stepping for two exactly-one producers (stepping the suspendable one first), push-linear when
-one side yields exactly one element per step, and pulls on both sides otherwise.
+Zip picks the cheapest correct strategy, following strymonas:
+* a shared index for two indexed producers;
+* lock-step stepping for two exactly-one producers (stepping the suspendable one first);
+* when one side yields exactly one element per step, the *other* side drives in its own nested
+  loops and this side is stepped inside;
+* otherwise only the shallower side becomes a pull, and the other side keeps its loops.
+
+`mapAccumFilter(z)((s, a) => (s', Option[b]))` is strymonas' Mealy machine (`map_accum_filter`):
+the step's tuple and `Some`/`None` are taken apart at compile time, through `if`/`else`.
 
 **Method splitting.** HotSpot does not JIT-compile methods over 8000 bytes of bytecode. The
 generator measures its output (≈1 byte of bytecode per tree node, calibrated against class
@@ -110,7 +116,7 @@ published artifacts on realistic fs2 / ZIO pipelines.
 
 | | fs2 | ZIO |
 |---|---|---|
-| fused operators | `map`, `filter`, `collect`, `mapFilter` (cats syntax), `take`, `drop`, `takeWhile`, `dropWhile`, `zipWithIndex`, `scan`, `fold`, `zip`, `zipWith`, `flatMap` onto `Stream.range` | `map`, `filter`, `collect`, `take`, `drop`, `takeWhile`, `dropWhile`, `zipWithIndex`, `scan`, `zipWith`, `flatMap` onto `ZStream.range` |
+| fused operators | `map`, `filter`, `collect`, `mapFilter` (cats syntax), `take`, `drop`, `takeWhile`, `dropWhile`, `zipWithIndex`, `scan`, `mapAccumulate`, `fold`, `zip`, `zipWith`, `flatMap` onto `Stream.range` | `map`, `filter`, `collect`, `take`, `drop`, `takeWhile`, `dropWhile`, `zipWithIndex`, `scan`, `mapAccum`, `zipWith`, `flatMap` onto `ZStream.range` |
 | inputs per run | up to 4 (`zipWith`; a pure `zipWith` operand is inlined instead) | up to 4 |
 | yields to the scheduler | `cede` when a `Spawn[F]` exists (not for `Pure`) | `yieldNow` |
 

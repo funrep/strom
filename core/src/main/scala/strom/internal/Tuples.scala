@@ -19,6 +19,12 @@ object Tuples:
       case Apply(Select(m, "apply"), args) if isTupleModule(m.symbol, args.size)                => Some(args)
       case _ => None
 
+  /** `TupleN.apply(args…)`. */
+  def tupleOf(using q: Quotes)(args: List[q.reflect.Term]): q.reflect.Term =
+    import q.reflect.*
+    Select.unique(Ref(Symbol.requiredModule(s"scala.Tuple${args.size}")), "apply")
+      .appliedToTypes(args.map(_.tpe.widen)).appliedToArgs(args)
+
   private def isTupleModule(using q: Quotes)(s: q.reflect.Symbol, n: Int): Boolean =
     n >= 2 && n <= 22 && s == q.reflect.Symbol.requiredModule(s"scala.Tuple$n")
 

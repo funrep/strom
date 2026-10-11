@@ -21,6 +21,8 @@ abstract class ChainFuser(using val q: Quotes):
     case ZipWith(that: Term, f: Term)
     /** `zip`: pairs, built from staging-time components (unboxed unless they escape). */
     case Zip(that: Term)
+    /** A Mealy machine; `out` says how the step's result encodes the output. */
+    case MapAccum(z: Term, f: Term, out: Pipe.AccumOut)
     case Fold(z: Term, op: Term)
     case Collect(pf: Term)
     case MapOption(f: Term)
@@ -153,6 +155,7 @@ abstract class ChainFuser(using val q: Quotes):
   private def name(o: PureOp): String = o match
     case _: PureOp.MapOption => "mapFilter"
     case _: PureOp.Zip => "zip"
+    case _: PureOp.MapAccum => "mapAccum"
     case _ => o.productPrefix.updated(0, o.productPrefix.head.toLower)
 
   final class Run(val original: Term, var pipe: Pipe[?], var inputs: Vector[(Term, TypeRepr)]):
@@ -219,6 +222,13 @@ abstract class ChainFuser(using val q: Quotes):
             r.pipe = Pipe.FlatMapP[a, b](up, Pipe.Inner { x =>
               innerPipe(Frontend.subst(body, List(param), List(x))).asInstanceOf[Pipe[b]]
             })
+          case PureOp.MapAccum(z, f, out) =>
+            elemOf(c.qual.tpe).asType match
+              case '[a0] =>
+                z.tpe.widen.asType match
+                  case '[st] =>
+                    r.pipe = Pipe.MapAccumP[a, st, b](up, z.asExprOf[st],
+                      front.fn2[st, a, Any](f.asExprOf[(st, a) => Any]), out)
           case PureOp.Zip(that) =>
             elemOf(that.tpe).asType match
               case '[t] =>

@@ -292,6 +292,53 @@ final class Gen(using val q: Quotes)(
       '{ if (${ dropping.get } && ${ p(a) }) () else $body }
     }, "dropWhile")
 
+  /** A Mealy machine. The step's result `(s', out)` is taken apart at staging time: through
+   *  blocks, `if`s and tuple / `Some` / `None` constructors, so the common case allocates neither a
+   *  tuple nor an `Option`; anything else is bound and projected. The output is staged into a
+   *  variable so that the downstream continuation is spliced once. */
+  def mapAccum[A, S: Type, B: Type](s: StStream[A], z: Expr[S], f: (Expr[S], Expr[A]) => Expr[Any], mode: Pipe.AccumOut): StStream[B] =
+    given Type[A] = s.tpe
+    val acc = alloc[S]("state")
+    val outV = alloc[B]("out")
+    val have = alloc[Boolean]("emit")
+    def setOut(b: Expr[B]): Expr[Unit] = seq(outV := b, have := '{ true })
+    def option(o: Term): Expr[Unit] = strip(o) match
+      case Block(stats, e) => Block(stats, option(e).asTerm).asExprOf[Unit]
+      case If(c, t, e)     => If(c, option(t).asTerm, option(e).asTerm).asExprOf[Unit]
+      case SomeOf(x)       => setOut(x.asExprOf[B])
+      case t if t.symbol == NoneSym => unit
+      case t => bind("o", t.asExprOf[Option[B]])(ov => { val set = setOut('{ $ov.get }); '{ if ($ov.isDefined) $set } })
+    def output(ns: Expr[S], o: Term): Expr[Unit] = mode match
+      case Pipe.AccumOut.OptionOut => option(o)
+      case Pipe.AccumOut.AlwaysOut => setOut(o.asExprOf[B])
+      case Pipe.AccumOut.PairOut   =>
+        o.tpe.widen.asType match
+          case '[t] => letIn(o.asExprOf[t])(b => setOut(Tuples.tupleOf(List(ns.asTerm, b.asTerm)).asExprOf[B]))
+    def branch(r: Term): Expr[Unit] = strip(r) match
+      case Block(stats, e) => Block(stats, branch(e).asTerm).asExprOf[Unit]
+      case If(c, t, e)     => If(c, branch(t).asTerm, branch(e).asTerm).asExprOf[Unit]
+      case t => Tuples.components(t) match
+        case Some(List(st, o)) => bind("ns", st.asExprOf[S])(ns => seq(output(ns, o), acc := ns))
+        case _ =>
+          bind("r", t.asExpr) { rv =>
+            bind("ns", Select.unique(rv.asTerm, "_1").asExprOf[S])(ns => seq(output(ns, Select.unique(rv.asTerm, "_2")), acc := ns))
+          }
+    mapPartial[A, B](withOuterInit(s, () => acc := z), (a, k) => {
+      val emit = seq(have := '{ false }, k(outV.get))
+      seq(branch(f(acc.get, a).asTerm), '{ if (${ have.get }) $emit })
+    }, "mapAccum")
+
+  private def strip(t: Term): Term = t match
+    case Inlined(_, Nil, e) => strip(e)
+    case Typed(e, _)        => strip(e)
+    case _                  => t
+  private val NoneSym = Symbol.requiredModule("scala.None")
+  private object SomeOf:
+    def unapply(t: Term): Option[Term] = t match
+      case Apply(TypeApply(Select(m, "apply"), _), List(x)) if m.symbol == Symbol.requiredModule("scala.Some") => Some(x)
+      case Apply(Select(m, "apply"), List(x)) if m.symbol == Symbol.requiredModule("scala.Some") => Some(x)
+      case _ => None
+
   /** Emits `z`, then the running fold. A pull over the upstream; the continuation is spliced once. */
   def scan[A, S: Type](s: StStream[A], z: Expr[S], op: (Expr[S], Expr[A]) => Expr[S]): StStream[S] =
     val acc = alloc[S]("scan")
@@ -516,6 +563,7 @@ final class Gen(using val q: Quotes)(
       case Pipe.ZipWithIndexP(up) => zipWithIndex(lower(up)).asInstanceOf[StStream[A]]
       case sc: Pipe.ScanP[a, s] => scan[a, s](lower(sc.up), sc.z, sc.op(_, _))(using sc.tpe)
       case Pipe.DropP(up, n) => drop(lower(up), n)
+      case m: Pipe.MapAccumP[a, s, b] => mapAccum[a, s, b](lower(m.up), m.z, m.f(_, _), m.out)(using m.stateTpe, m.tpe)
       case Pipe.TakeWhileP(up, pr) => takeWhile(lower(up), pr(_))
       case Pipe.DropWhileP(up, pr) => dropWhile(lower(up), pr(_))
 

@@ -41,6 +41,7 @@ private[zio] final class ZioFuser(using Quotes) extends ChainFuser:
     case ("zipWith", List(that) :: List(f) :: _ :: Nil) => Some(PureOp.ZipWith(that, f))
     case ("collect", List(pf) :: _ :: Nil) => Some(PureOp.Collect(pf))
     case ("zipWithIndex", List(_) :: Nil) => Some(PureOp.ZipWithIndex())
+    case ("mapAccum", List(z) :: List(f) :: _ :: Nil) => Some(PureOp.MapAccum(z, f, strom.internal.Pipe.AccumOut.AlwaysOut))
     case ("scan", List(z) :: List(f) :: _ :: Nil) => Some(PureOp.Scan(z, f))
     case ("drop", List(n) :: _ :: Nil) => Some(PureOp.Drop('{ ${ n.asExprOf[Int] }.toLong }.asTerm))
     case ("takeWhile", List(p) :: _ :: Nil) => Some(PureOp.TakeWhile(p))

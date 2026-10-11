@@ -79,6 +79,10 @@ class SegmentSuite extends munit.FunSuite:
   check1("new operators inside flatMap", Strom.segment(nestedNew), nestedNew)
   check2("scan zipped with indexed drop", Strom.segment2(zipScan), zipScan)
 
+  check1("mapAccumFilter (run lengths)", Strom.segment(runLengths), runLengths)
+  check1("mapAccum", Strom.segment(runningMax), runningMax)
+  check1("mapAccum inside flatMap", Strom.segment(accumInFlatMap), accumInFlatMap)
+
   test("plan metadata") {
     val f = Strom.foldSegment2(representative(3))
     assert(!f.plan.stateless)

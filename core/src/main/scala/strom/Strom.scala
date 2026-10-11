@@ -28,6 +28,11 @@ sealed abstract class Strom[A]:
   /** Emits `z`, then the running fold (like fs2 / ZIO `scan`). */
   def scan[S](z: S)(op: (S, A) => S): Strom[S] = ScanN(this, z, op)
   def drop(n: Long): Strom[A] = DropN(this, n)
+  /** A Mealy machine: a state threaded through the elements, emitting at most one output per
+   *  element. The step's tuple and `Some`/`None` are taken apart at compile time (no allocation). */
+  def mapAccumFilter[S, B](z: S)(f: (S, A) => (S, Option[B])): Strom[B] = MapAccumFilterN(this, z, f)
+  /** Like [[mapAccumFilter]], always emitting. */
+  def mapAccum[S, B](z: S)(f: (S, A) => (S, B)): Strom[B] = MapAccumFilterN(this, z, (s, a) => { val (s2, b) = f(s, a); (s2, Some(b)) })
   def takeWhile(p: A => Boolean): Strom[A] = TakeWhileN(this, p)
   def dropWhile(p: A => Boolean): Strom[A] = DropWhileN(this, p)
   /** Tumbling window of `size` elements, each folded with `op`; a final partial window is emitted. */
@@ -66,6 +71,7 @@ object Strom:
     final case class ZipWithIndexN[A](up: Strom[A]) extends Strom[(A, Long)]
     final case class ScanN[A, S](up: Strom[A], z: S, op: (S, A) => S) extends Strom[S]
     final case class DropN[A](up: Strom[A], n: Long) extends Strom[A]
+    final case class MapAccumFilterN[A, S, B](up: Strom[A], z: S, f: (S, A) => (S, Option[B])) extends Strom[B]
     final case class TakeWhileN[A](up: Strom[A], p: A => Boolean) extends Strom[A]
     final case class DropWhileN[A](up: Strom[A], p: A => Boolean) extends Strom[A]
     final case class WindowFoldN[A, S](up: Strom[A], size: Int, z: S, op: (S, A) => S) extends Strom[S]

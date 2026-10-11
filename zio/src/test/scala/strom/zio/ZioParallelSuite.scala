@@ -40,6 +40,11 @@ class ZioParallelSuite extends munit.FunSuite:
 
   val src: ZStream[Any, Nothing, Int] = ZStream.empty
 
+  same("zip with an effectful stream: runs around it in parallel")(
+    s => s.map(_ * 3).filter(_ % 2 == 0).zipWith(ZStream.range(0, 5000).mapZIO(ZIO.succeed(_)).map(_ + 1))(_ - _).map(_ * 7).filter(_ > 3),
+    (s, n) => StromZio.fusedPar(n)(
+      s.map(_ * 3).filter(_ % 2 == 0).zipWith(ZStream.range(0, 5000).mapZIO(ZIO.succeed(_)).map(_ + 1))(_ - _).map(_ * 7).filter(_ > 3)))
+
   test("plans") {
     assertEquals(StromZio.fusedParPlan(src.map(_ * 2).filter(_ > 0).take(5).map(_ + 1)),
       "fused: map → filter → take → map (1 inputs), parallel: replicated[map → filter] | single[take → map]")

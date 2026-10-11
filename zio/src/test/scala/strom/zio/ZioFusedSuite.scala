@@ -53,3 +53,10 @@ class ZioFusedSuite extends munit.FunSuite:
     assertEquals(StromZio.fusedPlan(s.map(_ + 1).zipWith(ZStream.range(0, 9).map(_ * 2))(_ + _)),
       "fused: map → zipWith (1 inputs)")
   }
+
+  same("flatMap onto succeed / fromIterable / fromChunk")(
+    s => s.flatMap(x => ZStream.succeed(x * 2)).flatMap(x => ZStream.fromIterable(List(x, x + 1).filter(_ % 3 != 0)))
+      .flatMap(x => ZStream.fromChunk(Chunk(x, -x))).map(_ + 1),
+    s => StromZio.fused(s.flatMap(x => ZStream.succeed(x * 2)).flatMap(x => ZStream.fromIterable(List(x, x + 1).filter(_ % 3 != 0)))
+      .flatMap(x => ZStream.fromChunk(Chunk(x, -x))).map(_ + 1)))
+

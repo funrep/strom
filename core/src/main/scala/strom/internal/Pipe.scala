@@ -24,6 +24,13 @@ object Pipe:
 
   final case class SrcArray[A: Type](arr: Expr[Array[A]]) extends Pipe[A]
   final case class SrcRange(from: Expr[Int], until: Expr[Int])(using Type[Int]) extends Pipe[Int]
+  /** One element (`Stream.emit`, `ZStream.succeed`). */
+  final case class SrcOne[A: Type](x: Expr[A]) extends Pipe[A]
+  /** An indexed collection `coll`, read with `length` and `at` (a chunk, an `IndexedSeq`). */
+  final case class SrcIndexed[A: Type, C](coll: Expr[C], length: Fn1[C, Int], at: Fn2[C, Int, A])(
+      using val collTpe: Type[C]) extends Pipe[A]
+  /** Elements of an iterator (e.g. of a `List`); one iterator per run of the source. */
+  final case class SrcIter[A: Type](it: Expr[Iterator[A]]) extends Pipe[A]
   /** An input port of a resumable segment. */
   final case class SrcPort[A: Type](port: Int) extends Pipe[A]
   final case class ZipWithP[A, B, C: Type](l: Pipe[A], r: Pipe[B], f: Fn2[A, B, C]) extends Pipe[C]
@@ -89,6 +96,9 @@ object Pipe:
   def stageInfo(p: Pipe[?]): StageInfo = p match
     case _: SrcArray[?]           => StageInfo("source:array", stateless = true, Cardinality.OneToOne)
     case _: SrcRange              => StageInfo("source:range", stateless = true, Cardinality.OneToOne)
+    case _: SrcOne[?]             => StageInfo("source:one", stateless = true, Cardinality.OneToOne)
+    case _: SrcIndexed[?, ?]      => StageInfo("source:indexed", stateless = true, Cardinality.OneToOne)
+    case _: SrcIter[?]            => StageInfo("source:iterator", stateless = true, Cardinality.OneToOne)
     case SrcPort(n)               => StageInfo(s"source:port$n", stateless = true, Cardinality.OneToOne)
     case _: MapP[?, ?]            => StageInfo("map", stateless = true, Cardinality.OneToOne)
     case _: FilterP[?]            => StageInfo("filter", stateless = true, Cardinality.AtMostOne)

@@ -551,6 +551,19 @@ final class Gen(using val q: Quotes)(
         val len = alloc[Int]("len")
         Linear(labeled(ForP[Int, Unit](k => seq(base := from, len := '{ $until - ${ base.get } }, k(())), _ => len.get,
           (_, i) => k => letIn('{ ${ base.get } + $i })(k)), "range")).asInstanceOf[StStream[A]]
+      case Pipe.SrcOne(x) =>
+        val v = alloc[A]("one")
+        Linear(labeled(ForP[A, Unit](k => seq(v := x, k(())), _ => '{ 1 }, (_, _) => k => k(v.get)), "one"))
+      case src: Pipe.SrcIndexed[A, c] =>
+        given Type[c] = src.collTpe
+        val cv = alloc[c]("coll")
+        val len = alloc[Int]("len")
+        Linear(labeled(ForP[A, Unit](k => seq(cv := src.coll, len := src.length(cv.get), k(())), _ => len.get,
+          (_, i) => k => letIn(src.at(cv.get, i))(k)), "indexed"))
+      case Pipe.SrcIter(it) =>
+        val iv = alloc[Iterator[A]]("it")
+        Linear(labeled(UnfoldP[A, Unit](k => seq(iv := it, k(())), _ => '{ ${ iv.get }.hasNext }, Card.Many,
+          _ => k => letIn('{ ${ iv.get }.next() })(k), suspends = false), "iterator"))
       case Pipe.SrcPort(n) => portStream[A](n)
       case Pipe.MapP(up, f) => map(lower(up), f(_))
       case Pipe.FilterP(up, pr) => filter(lower(up), pr(_))

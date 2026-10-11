@@ -24,7 +24,8 @@ abstract class ChainFuser(using val q: Quotes):
     case Zip(that: Term)
     /** A Mealy machine; `out` says how the step's result encodes the output. */
     case MapAccum(z: Term, f: Term, out: Pipe.AccumOut)
-    case Fold(z: Term, op: Term)
+    /** `assoc`: the adapter knows `op` is associative with identity `z` (e.g. a cats `Monoid`). */
+    case Fold(z: Term, op: Term, assoc: Boolean = false)
     case Collect(pf: Term)
     case MapOption(f: Term)
     case ZipWithIndex()
@@ -39,8 +40,8 @@ abstract class ChainFuser(using val q: Quotes):
   protected def elemOf(t: TypeRepr): TypeRepr
   /** The pure operator `c` is, if any (before checking flatMap bodies). */
   protected def pureOp(c: Call): Option[PureOp]
-  /** `range(from, until)` over Ints, as a source. */
-  protected def intRange(t: Term): Option[(Expr[Int], Expr[Int])]
+  /** A pure source the adapter recognises (`range`, `emit`, `emits`, `chunk`, …), as a pipe. */
+  protected def source(t: Term): Option[Pipe[?]]
   /** Code running the compiled segment of `run`, typed like `run.calls.last.term`. */
   protected def emit(run: Run, sink: Pipe.Sink): Term
 
@@ -50,6 +51,21 @@ abstract class ChainFuser(using val q: Quotes):
    *  tag `tag`) on `n` workers, typed like `run.calls.last.term`; None if the stream's effect
    *  cannot run concurrently. */
   protected def emitParallel(run: Run, plan: Term, input: Term, tag: Term, n: Term): Option[Term] = None
+
+  // ------------------------------------------------------------------ sources for adapters
+
+  protected def rangeSource(from: Term, until: Term): Pipe[?] = Pipe.SrcRange(from.asExprOf[Int], until.asExprOf[Int])
+
+  protected def oneSource(x: Term, elem: TypeRepr): Pipe[?] = elem.asType match
+    case '[a] => Pipe.SrcOne[a](x.asExprOf[a])
+
+  /** A `scala.collection.Seq` / `Iterable`: by index if it is an `IndexedSeq`, else by iterator. */
+  protected def seqSource(xs: Term, elem: TypeRepr): Pipe[?] = elem.asType match
+    case '[a] =>
+      if xs.tpe <:< TypeRepr.of[collection.IndexedSeq[a]] then
+        Pipe.SrcIndexed[a, collection.IndexedSeq[a]](xs.asExprOf[collection.IndexedSeq[a]],
+          Pipe.Fn1(c => '{ $c.length }), Pipe.Fn2((c, i) => '{ $c($i) }))
+      else Pipe.SrcIter[a]('{ ${ xs.asExprOf[Iterable[a]] }.iterator })
 
   // ------------------------------------------------------------------ machinery
 
@@ -158,10 +174,10 @@ abstract class ChainFuser(using val q: Quotes):
     case Lambda(List(p), body) => Some((p.symbol, body))
     case _ => None
 
-  /** A flatMap body we can fuse: a range followed by pure map/filter/take/flatMap. */
+  /** A flatMap body we can fuse: a pure source followed by pure map/filter/take/flatMap. */
   private def pureInner(t: Term): Boolean =
     val (src, calls) = chain(t)
-    intRange(src).isDefined && calls.forall(c => op(c).exists {
+    source(src).isDefined && calls.forall(c => op(c).exists {
       case _: PureOp.ZipWith | _: PureOp.Fold => false
       case _ => true
     })
@@ -208,9 +224,16 @@ abstract class ChainFuser(using val q: Quotes):
     for c <- calls do
       op(c) match
         case Some(o) if canAdd(o) =>
+          // fusedPar: a zip with another (effectful) stream gets a run of its own, so that the runs
+          // before and after it have one input and can be planned in parallel.
+          val ownRun = parallelism.isDefined && (o match
+            case PureOp.Zip(that)        => !pureInner(that)
+            case PureOp.ZipWith(that, _) => !pureInner(that)
+            case _                       => false)
+          if ownRun then flush()
           val r = run.getOrElse {
-            val started = intRange(current) match
-              case Some((from, until)) => Run(current, Pipe.SrcRange(from, until), Vector.empty)
+            val started = source(current) match
+              case Some(src) => Run(current, src, Vector.empty)
               case None =>
                 elemOf(current.tpe).asType match
                   case '[a] => Run(current, Pipe.SrcPort[a](0), Vector(current -> elemOf(current.tpe)))
@@ -218,7 +241,7 @@ abstract class ChainFuser(using val q: Quotes):
             started
           }
           add(r, c, o)
-          if o.isInstanceOf[PureOp.Fold] then flush()
+          if o.isInstanceOf[PureOp.Fold] || ownRun then flush()
         case _ =>
           kept += c.name.stripSuffix("*")
           flush()
@@ -339,10 +362,10 @@ abstract class ChainFuser(using val q: Quotes):
           case PureOp.Drop(n) => r.pipe = Pipe.DropP[a](up, n.asExprOf[Long])
           case PureOp.TakeWhile(p) => r.pipe = Pipe.TakeWhileP[a](up, front.fn1[a, Boolean](p.asExprOf[a => Boolean]))
           case PureOp.DropWhile(p) => r.pipe = Pipe.DropWhileP[a](up, front.fn1[a, Boolean](p.asExprOf[a => Boolean]))
-          case PureOp.Fold(z, f) =>
+          case PureOp.Fold(z, f, assoc) =>
             // A recognised associative operator over the element type allows parallel partial folds.
             val combine =
-              if TypeRepr.of[a] =:= TypeRepr.of[b] && associative(z, f) then Some(front.fn2[b, b, b](f.asExprOf[(b, b) => b]))
+              if TypeRepr.of[a] =:= TypeRepr.of[b] && (assoc || associative(z, f)) then Some(front.fn2[b, b, b](f.asExprOf[(b, b) => b]))
               else None
             r.fold = Some(Pipe.FoldSink[a, b](up, z.asExprOf[b], front.fn2[b, a, b](f.asExprOf[(b, a) => b]),
               associative = combine.isDefined, combine))
@@ -358,8 +381,7 @@ abstract class ChainFuser(using val q: Quotes):
   /** Pipe for a pure inner stream (checked by `pureInner`). */
   private def innerPipe(t: Any): Pipe[?] =
     val (src, calls) = chain(t.asInstanceOf[Term])
-    val (from, until) = intRange(src).get
-    val r = Run(src, Pipe.SrcRange(from, until), Vector.empty)
+    val r = Run(src, source(src).get, Vector.empty)
     calls.foreach(c => add(r, c, op(c).get))
     r.pipe
 

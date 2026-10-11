@@ -2,6 +2,7 @@ package strom.fs2
 
 import strom.runtime.Segment
 import scala.quoted.*
+import scala.reflect.ClassTag
 import strom.internal.{ChainFuser, Pipe}
 
 private[fs2] object FusedMacro:
@@ -39,6 +40,8 @@ private[fs2] final class Fs2Fuser(par: Option[Expr[Int]] = None)(using Quotes) e
     case ("filter", List(List(p)))             => Some(PureOp.Filter(p))
     case ("take", List(List(n)))               => Some(PureOp.Take(n))
     case ("fold", List(List(z), List(f)))      => Some(PureOp.Fold(z, f))
+    // foldMonoid[O2 >: O](using Monoid[O2]): associative by the Monoid laws
+    case ("foldMonoid", List(List(m))) if c.targs.headOption.forall(_ =:= elemOf(c.qual.tpe)) => monoidFold(m, elemOf(c.qual.tpe))
     case ("collect", List(List(pf)))           => Some(PureOp.Collect(pf))
     case ("mapFilter*", List(List(f)))         => Some(PureOp.MapOption(f)) // cats FunctorFilter syntax
     case ("zipWithIndex", Nil)                 => Some(PureOp.ZipWithIndex())
@@ -55,14 +58,36 @@ private[fs2] final class Fs2Fuser(par: Option[Expr[Int]] = None)(using Quotes) e
       Some(PureOp.ZipWith(that, f))
     case _ => None
 
+  private def monoidFold(m: Term, elem: TypeRepr): Option[PureOp] = elem.asType match
+    case '[a] =>
+      val monoid = m.asExprOf[cats.kernel.Monoid[a]]
+      Some(PureOp.Fold('{ $monoid.empty }.asTerm, '{ (x: a, y: a) => $monoid.combine(x, y) }.asTerm, assoc = true))
+
   private def isFalse(t: Term): Boolean = strip(t) match
     case Literal(BooleanConstant(false)) => true
     case other => other.symbol.name.contains("$default$") // the default argument (false)
 
-  protected def intRange(t: Term): Option[(Expr[Int], Expr[Int])] = asCall(strip(t)) match
-    case Some(Call(_, qual, "range", _, List(a, b) :: _)) if qual.symbol == StreamModule && elemOf(t.tpe) =:= TypeRepr.of[Int] =>
-      Some((a.asExprOf[Int], b.asExprOf[Int]))
+  /** `Stream.range(a, b)` (Ints), `Stream.emit(x)`, `Stream.emits(xs)`, `Stream.iterable(xs)`,
+   *  `Stream.chunk(c)` (read through a primitive array slice). */
+  protected def source(t: Term): Option[Pipe[?]] = asCall(strip(t)) match
+    case Some(Call(_, qual, name, _, args :: _)) if qual.symbol == StreamModule =>
+      val elem = elemOf(t.tpe)
+      (name, args) match
+        case ("range", List(a, b)) if elem =:= TypeRepr.of[Int] => Some(rangeSource(a, b))
+        case ("emit", List(x))      => Some(oneSource(x, elem))
+        case ("emits", List(xs))    => Some(seqSource(xs, elem))
+        case ("iterable", List(xs)) => Some(seqSource(xs, elem))
+        case ("chunk", List(c))     => chunkSource(c, elem)
+        case _ => None
     case _ => None
+
+  private def chunkSource(c: Term, elem: TypeRepr): Option[Pipe[?]] = elem.asType match
+    case '[a] =>
+      Expr.summon[ClassTag[a]].map { tag =>
+        type S = _root_.fs2.Chunk.ArraySlice[a]
+        Pipe.SrcIndexed[a, S]('{ ${ c.asExprOf[_root_.fs2.Chunk[a]] }.toArraySlice(using $tag) },
+          Pipe.Fn1(s => '{ $s.length }), Pipe.Fn2((s, i) => '{ $s.values($s.offset + $i) }))
+      }
 
   override protected def parallelism: Option[Term] = par.map(_.asTerm)
 

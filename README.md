@@ -58,11 +58,14 @@ the published artifacts on realistic fs2 / ZIO pipelines.
 
 | | fs2 | ZIO |
 |---|---|---|
-| fused operators | `map`, `filter`, `collect`, `mapFilter` (cats syntax), `take`, `drop`, `takeWhile`, `dropWhile`, `zipWithIndex`, `scan`, `mapAccumulate`, `fold`, `zip`, `zipWith`, `flatMap` onto `Stream.range` | `map`, `filter`, `collect`, `take`, `drop`, `takeWhile`, `dropWhile`, `zipWithIndex`, `scan`, `mapAccum`, `zipWith`, `flatMap` onto `ZStream.range` |
+| fused operators | `map`, `filter`, `collect`, `mapFilter` (cats syntax), `take`, `drop`, `takeWhile`, `dropWhile`, `zipWithIndex`, `scan`, `mapAccumulate`, `fold`, `zip`, `zipWith`, `foldMonoid`, `flatMap` onto `Stream.range` / `emit` / `emits` / `chunk` / `iterable` | `map`, `filter`, `collect`, `take`, `drop`, `takeWhile`, `dropWhile`, `zipWithIndex`, `scan`, `mapAccum`, `zipWith`, `flatMap` onto `ZStream.range` / `succeed` / `fromIterable` / `fromChunk` |
 | inputs per run | up to 4 (`zipWith`; a pure `zipWith` operand is inlined instead) | up to 4 |
 | yields to the scheduler | `cede` when a `Spawn[F]` exists (not for `Pure`) | `yieldNow` |
 
 A run must be worth a segment boundary: two or more operators, or a `flatMap`, `zipWith` or `fold`.
+These pure sources also start a run (`Stream.emits(xs).map(f).filter(p)` is one loop). A `List`
+or other non-indexed collection is read through one iterator per `flatMap` element; chunks and
+`IndexedSeq`s are read by index.
 The library-independent part lives in `strom.internal.ChainFuser`; each adapter only says
 which calls are pure operators and how to run a segment.
 
@@ -88,12 +91,15 @@ of the sequential stream, in the same order.
   `takeWhile`, …): one instance. The run is cut there, so stateless work before and after it
   still runs in parallel (light trailing work stays fused with the stateful operator).
 * **`fold`** with a recognised associative operator and its identity as the start value
-  (`_ + _` from 0, `_ * _` from 1, `&`, `|`, `^`, `math.max` / `math.min`, on Ints or Longs):
-  each chunk is folded separately and the partial results are combined in order. Any other fold
-  runs on one instance.
+  (`_ + _` from 0, `_ * _` from 1, `&`, `|`, `^`, `math.max` / `math.min`, on Ints or Longs), or
+  fs2 `foldMonoid` (associative by the cats Monoid laws): each chunk is folded separately and
+  the partial results are combined in order. Any other fold runs on one instance (Double `+` is
+  left out on purpose: regrouping changes the rounding).
+* **`zip` / `zipWith` with another effectful stream**: the zip itself runs on one instance;
+  the work before and after it gets its own parallel runs (and the other stream's own pure
+  operators are fused and parallelised separately).
 * Effects and other unfused operators stay where they are, as with `fused`. Runs with no
-  parallel part, or with several inputs (a `zip` of two effectful streams), run sequentially.
-  fs2 needs `Concurrent[F]`; without it the run stays sequential.
+  parallel part run sequentially. fs2 needs `Concurrent[F]`; without it the run stays sequential.
 
 **Safety.** The lambdas of fused operators run on several threads at once, so they must be pure.
 A lambda that reads or writes a captured `var` is rejected at compile time. Other shared mutable
@@ -312,9 +318,12 @@ request or I/O callback would see.
 
 ## Limits (v1)
 
-* `fusedPar` parallelises one-input runs; the "heavy" rule for re-replicating after a stateful
-  operator is a fixed heuristic (no cost model). Associative folds are recognised only for the
-  operators listed in [Running on several cores](#running-on-several-cores).
+* The "heavy" rule for re-replicating after a stateful operator is a fixed heuristic (no cost
+  model). Associative folds are recognised only for the forms listed in
+  [Running on several cores](#running-on-several-cores).
+* Inner streams of a fused `flatMap` must be pure sources (`range`, `emit`, `emits`, `chunk`, …)
+  plus pure operators; any other `flatMap` is kept as written. Generic library collections may
+  box primitives when read (e.g. ZIO `Chunk.apply`).
 * Not fused (by design): fan-out (an input port is consumed once), effects inside segments,
   dynamic pipeline shapes. Those stay at the runtime level, between segments.
 * `flatMap` needs a lambda literal whose body is a `Strom` expression. Other functions may be

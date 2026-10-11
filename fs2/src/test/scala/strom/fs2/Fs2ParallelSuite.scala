@@ -54,6 +54,19 @@ class Fs2ParallelSuite extends munit.FunSuite:
     s => s.map(_ + 1).filter(_ > 0).evalMap(x => IO(x * 2)).map(_ - 1).filter(_ % 3 != 0).scan(0)(_ + _),
     (s, n) => StromFs2.fusedPar(n)(s.map(_ + 1).filter(_ > 0).evalMap(x => IO(x * 2)).map(_ - 1).filter(_ % 3 != 0).scan(0)(_ + _)))
 
+  same("zip with an effectful stream: runs around it in parallel")(
+    s => s.map(_ * 3).filter(_ % 2 == 0).zipWith(Stream.range(0, 5000).covary[IO].evalMap(IO.pure).map(_ + 1))(_ - _).map(_ * 7).filter(_ > 3).map(_ + 2),
+    (s, n) => StromFs2.fusedPar(n)(
+      s.map(_ * 3).filter(_ % 2 == 0).zipWith(Stream.range(0, 5000).covary[IO].evalMap(IO.pure).map(_ + 1))(_ - _).map(_ * 7).filter(_ > 3).map(_ + 2)))
+
+  same("foldMonoid: partial folds")(
+    s => s.map(_.toLong * 3).foldMonoid,
+    (s, n) => StromFs2.fusedPar(n)(s.map(_.toLong * 3).foldMonoid))
+
+  same("flatMap onto emits")(
+    s => s.flatMap(x => Stream.emits(List.fill(x % 4)(x))).map(_ + 1),
+    (s, n) => StromFs2.fusedPar(n)(s.flatMap(x => Stream.emits(List.fill(x % 4)(x))).map(_ + 1)))
+
   test("empty input") {
     assertEquals(StromFs2.fusedPar(3)(Stream.empty.covaryAll[IO, Int].map(_ * 2).fold(0)(_ + _)).compile.toList.unsafeRunSync(), List(0))
   }
@@ -67,6 +80,16 @@ class Fs2ParallelSuite extends munit.FunSuite:
       "fused: map → fold (1 inputs), parallel: partialFold[map → fold]")
     assertEquals(StromFs2.fusedParPlan(src.take(5L).scan(0)(_ + _)),
       "fused: take → scan (1 inputs)")
+  }
+
+  test("zip plans") {
+    val other: Stream[IO, Int] = Stream.empty
+    assertEquals(StromFs2.fusedParPlan(src.map(_ * 2).filter(_ > 0).zipWith(other.evalMap(IO.pure))(_ + _).map(_ + 1).map(_ * 2).map(_ - 1)),
+      List("fused: map → filter (1 inputs), parallel: replicated[map → filter]",
+        "fused: zipWith (2 inputs)",
+        "fused: map → map → map (1 inputs), parallel: replicated[map → map → map]",
+        "kept: evalMap").mkString("\n"))
+    assertEquals(StromFs2.fusedParPlan(src.map(_ * 2).foldMonoid), "fused: map → fold (1 inputs), parallel: partialFold[map → fold]")
   }
 
   test("a captured var is a compile error") {

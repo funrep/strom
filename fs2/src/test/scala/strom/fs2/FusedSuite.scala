@@ -84,3 +84,26 @@ class FusedSuite extends munit.FunSuite:
     // A lone map is not worth a segment boundary.
     assertEquals(StromFs2.fusedPlan(s.map(_ + 1).evalMap(x => IO(x))), "kept: evalMap")
   }
+
+  same("flatMap onto emit / emits / chunk / iterable")(
+    s => s.flatMap(x => Stream.emit(x * 2)).flatMap(x => Stream.emits(List(x, x + 1).filter(_ % 3 != 0)))
+      .flatMap(x => Stream.emits(Vector.fill(x % 3)(x))).flatMap(x => Stream.chunk(Chunk(x, -x)))
+      .flatMap(x => Stream.iterable(Set(x)).map(_ + 1)),
+    s => StromFs2.fused(s.flatMap(x => Stream.emit(x * 2)).flatMap(x => Stream.emits(List(x, x + 1).filter(_ % 3 != 0)))
+      .flatMap(x => Stream.emits(Vector.fill(x % 3)(x))).flatMap(x => Stream.chunk(Chunk(x, -x)))
+      .flatMap(x => Stream.iterable(Set(x)).map(_ + 1))))
+
+  same("flatMap onto emits of strings")(
+    s => s.flatMap(x => Stream.emits(x.toString.split("").toList)).map(_.length),
+    s => StromFs2.fused(s.flatMap(x => Stream.emits(x.toString.split("").toList)).map(_.length)))
+
+  same("foldMonoid")(
+    s => s.map(_.toLong).filter(_ > 3).foldMonoid,
+    s => StromFs2.fused(s.map(_.toLong).filter(_ > 3).foldMonoid))
+
+  test("an emits source starts a run") {
+    val xs = List(1, 2, 3, 4, 5)
+    assertEquals(StromFs2.fused(Stream.emits(xs).map(_ * 2).filter(_ > 4)).toList, List(6, 8, 10))
+    assertEquals(StromFs2.fusedPlan(Stream.emits(xs).map(_ * 2).filter(_ > 4)), "fused: map → filter (0 inputs), never cedes")
+  }
+

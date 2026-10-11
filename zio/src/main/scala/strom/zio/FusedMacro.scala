@@ -49,9 +49,16 @@ private[zio] final class ZioFuser(par: Option[Expr[Int]] = None)(using Quotes) e
     case ("dropWhile", List(p) :: _ :: Nil) => Some(PureOp.DropWhile(p))
     case _ => None
 
-  protected def intRange(t: Term): Option[(Expr[Int], Expr[Int])] = asCall(strip(t)) match
-    case Some(Call(_, qual, "range", _, (a :: b :: _) :: _)) if qual.symbol == StreamModule =>
-      Some((a.asExprOf[Int], b.asExprOf[Int]))
+  /** `ZStream.range(a, b)`, `ZStream.succeed(x)`, `ZStream.fromIterable(xs)`, `ZStream.fromChunk(c)`. */
+  protected def source(t: Term): Option[Pipe[?]] = asCall(strip(t)) match
+    case Some(Call(_, qual, name, _, args :: _)) if qual.symbol == StreamModule =>
+      val elem = elemOf(t.tpe)
+      (name, args) match
+        case ("range", a :: b :: _)     => Some(rangeSource(a, b))
+        case ("succeed", List(x))       => Some(oneSource(x, elem))
+        case ("fromIterable", List(xs)) => Some(seqSource(xs, elem))
+        case ("fromChunk", List(c))     => Some(seqSource(c, elem)) // a Chunk is an IndexedSeq
+        case _ => None
     case _ => None
 
   override protected def parallelism: Option[Term] = par.map(_.asTerm)

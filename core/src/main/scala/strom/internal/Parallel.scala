@@ -47,7 +47,7 @@ object Parallel:
 
   private def containsPort(p: Pipe[?]): Boolean = p match
     case _: SrcPort[?] => true
-    case _: SrcArray[?] | _: SrcRange => false
+    case _: SrcArray[?] | _: SrcRange | _: SrcOne[?] | _: SrcIndexed[?, ?] | _: SrcIter[?] => false
     case ZipWithP(l, r, _) => containsPort(l) || containsPort(r)
     case u: Unary[?, ?] => containsPort(u.up)
 

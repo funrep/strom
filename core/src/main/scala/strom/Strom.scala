@@ -5,7 +5,7 @@ import strom.runtime.{DirectFrame, SegmentFactory}
 /** A fusible stream description: the lower-level API under `StromFs2.fused` / `StromZio.fused`.
  *
  *  `Strom` values are ordinary immutable trees, so the same expression can be run by the naive
- *  [[Reference]] interpreter. The staged entry points ([[Strom.run]], [[Strom.segment]], …) never
+ *  `Reference` interpreter (in the test sources). The staged entry points ([[Strom.run]], [[Strom.segment]], …) never
  *  build this tree: they are macros that read the *source* of the expression and compile it into
  *  a fused, allocation-free loop. Pipelines given to them must therefore be written inline
  *  (directly or via `inline def`), with lambda literals for `flatMap`.

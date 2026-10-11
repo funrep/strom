@@ -93,6 +93,10 @@ LoomParallel.plan((a: Strom[Int]) => …)   // parallel plan on plain (virtual) 
 Strom.showCode(…) / Strom.explain(…)      // generated code / IR shape, at compile time
 ```
 
+Besides the operators `fused` maps onto, the DSL has `windowFold(size)(z)(op)` (tumbling
+windows, each folded) and `foldAssociative(z)(op)`, a fold you declare associative so that
+parallel plans can run it as partial folds.
+
 ## Guarantees
 
 * **No per-element allocation** on the fused path: lambdas are inlined, element types are
@@ -157,7 +161,7 @@ the layer:
 
 * **The compiler (Strom DSL, segments, parallel plans)** is checked against a *reference
   interpreter*: a ~30-line implementation of every operator on top of Scala iterators
-  (`Reference.scala`). It is written to be obviously correct, not fast. Each pipeline runs on
+  (`Reference.scala`, in the test sources). It is written to be obviously correct, not fast. Each pipeline runs on
   random inputs, cut into **random chunks** (including empty ones), with random output buffer
   sizes and random work budgets down to 1, so every place a segment can stop and resume is
   exercised. A further suite generates **random pipeline shapes**, compiles them at test time
@@ -262,9 +266,9 @@ fs2 / ZIO code. Correctness rests on property tests, not mechanised proofs.
 ## References
 
 1. Kiselyov, Biboudis, Palladinos, Smaragdakis. *Stream Fusion, to Completeness*. POPL 2017.
-   [doi:10.1145/3009837](https://doi.org/10.1145/3009837)
+   [doi:10.1145/3009837.3009880](https://doi.org/10.1145/3009837.3009880)
 2. Kiselyov, Kobayashi, Palladinos. *Complete Fusion for Stateful Streams: Equational Theory of
-   Stateful Streams and Fusion as Normalization-by-Evaluation*. TOPLAS.
+   Stateful Streams and Fusion as Normalization-by-Evaluation*. Preprint, 2024.
    [arXiv:2412.15768](https://arxiv.org/abs/2412.15768),
    [strymonas-ocaml](https://github.com/strymonas/strymonas-ocaml)
 3. Kobayashi, Kiselyov. *Complete Stream Fusion for Software-Defined Radio*. PEPM 2024.
@@ -272,4 +276,5 @@ fs2 / ZIO code. Correctness rests on property tests, not mechanised proofs.
 
 ## License
 
-MIT, see [LICENSE](LICENSE).
+MIT, see [LICENSE](LICENSE). The stream IR follows strymonas (also MIT); its copyright notice
+is in [NOTICE](NOTICE).

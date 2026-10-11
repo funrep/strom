@@ -51,7 +51,7 @@ final class LocalStorage(using q0: Quotes)(owner: q0.reflect.Symbol) extends Sto
   def wrap[R: Type](body: Expr[R]): Expr[R] =
     Block(defs.toList.map((s, z) => ValDef(s, Some(z))), body.asTerm).asExprOf[R]
 
-/** Variables mapped onto the primitive slot fields of [[Slots]] (resumable segments). */
+/** Variables mapped onto the primitive slot fields of [[strom.runtime.Slots]] (resumable segments). */
 final class FieldStorage(using q: Quotes)(self: Expr[Slots]) extends Storage:
   import q.reflect.*
   private val used = collection.mutable.Map.empty[Char, Int].withDefaultValue(0)

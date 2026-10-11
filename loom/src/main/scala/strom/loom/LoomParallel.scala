@@ -5,7 +5,7 @@ import java.util.concurrent.atomic.AtomicInteger
 import strom.loom.StromLoom.*
 import strom.runtime.*
 
-/** Executes a [[ParallelPlan]] on threads. Tiers are connected by bounded queues of [[Msg]].
+/** Executes a [[strom.runtime.ParallelPlan]] on threads. Tiers are connected by bounded queues of [[strom.loom.StromLoom.Msg]].
  *
  *  Coordination (readers, coordinators, routers) runs on virtual threads; the CPU-bound
  *  workers run on `compute` threads: virtual by default, or e.g. a dedicated pool of platform

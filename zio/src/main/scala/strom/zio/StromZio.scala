@@ -43,7 +43,7 @@ object StromZio:
 
   // ------------------------------------------------------------------ parallel plans
 
-  /** Runs a [[ParallelPlan]]: replicated tiers on `parallelism` concurrent instances
+  /** Runs a [[strom.runtime.ParallelPlan]]: replicated tiers on `parallelism` concurrent instances
    *  (`mapZIOPar`, order preserved), partial folds combined in order, keyed tiers on one instance
    *  per partition (bounded queues, merged), single tiers sequentially. CPU work runs on
    *  `compute` if given (a dedicated executor keeps fused loops off the default one). */

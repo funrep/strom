@@ -222,7 +222,7 @@ abstract class ChainFuser(using val q: Quotes):
   private def add(r: Run, c: Call, o: PureOp): Unit =
     r.calls :+= c
     r.names :+= name(o)
-    (elemOf(c.qual.tpe).asType, elemOf(c.term.tpe).asType) match
+    ((elemOf(c.qual.tpe).asType, elemOf(c.term.tpe).asType): @unchecked) match
       case ('[a], '[b]) =>
         val up = r.pipe.asInstanceOf[Pipe[a]]
         o match

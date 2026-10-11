@@ -3,7 +3,7 @@ package strom.internal
 import scala.quoted.*
 import strom.runtime.{DirectFrame, PlanInfo, Segment, SegmentFactory, Slots}
 
-/** Turns a [[Pipe.Sink]] into code: a direct fused loop, or a resumable [[Segment]] class.
+/** Turns a [[Pipe.Sink]] into code: a direct fused loop, or a resumable [[strom.runtime.Segment]] class.
  *  Shared by the macros (compile time) and by `scala.quoted.staging` (tests). */
 object Codegen:
 

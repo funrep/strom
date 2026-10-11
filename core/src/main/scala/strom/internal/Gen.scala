@@ -15,7 +15,7 @@ import strom.runtime.Segment.Status
  *               boundary and re-entered later. Used for zip/window operands (pulls) and for
  *               every loop of a resumable segment.
  *
- *  In resumable mode, the generated code may `return` a [[Status]] from the step method
+ *  In resumable mode, the generated code may `return` a [[strom.runtime.Segment.Status]] from the step method
  *  (input exhausted, output full, budget exhausted, done). Suspension only ever happens
  *  *before* an element is consumed, or after it has been stored in state, so re-entering
  *  the loops from the top continues exactly where they stopped.

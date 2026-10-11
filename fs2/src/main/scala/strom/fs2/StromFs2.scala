@@ -36,7 +36,7 @@ object StromFs2:
 
   // ------------------------------------------------------------------ parallel plans
 
-  /** Runs a [[ParallelPlan]]: replicated tiers on `parallelism` concurrent instances (output
+  /** Runs a [[strom.runtime.ParallelPlan]]: replicated tiers on `parallelism` concurrent instances (output
    *  order preserved by `parEvalMap`), partial folds combined in order, keyed tiers on one
    *  instance per partition, single tiers sequentially. CPU work runs on `compute` if given
    *  (a dedicated pool keeps fused loops away from the threads that serve I/O). */

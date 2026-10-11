@@ -124,6 +124,18 @@ A run must be worth a segment boundary: two or more operators, or a `flatMap`, `
 The library-independent part lives in `strom.internal.ChainFuser`; each adapter only says
 which calls are pure operators and how to run a segment.
 
+## Relation to strymonas
+
+Ström follows Kiselyov et al.'s strymonas (POPL 2017, and the later normalization-by-evaluation
+version). From the later version it adopts:
+* zipping by driving with the complex side and linearising only the simple one;
+* elements as staging-time values, so tuples never exist at runtime unless they escape;
+* `map_accum_filter` as the general stateful operator.
+
+It adds resumable, chunk-driven segments, a sans-I/O runner with fs2 / ZIO / loom adapters, a
+parallel tier, and fusion of plain fs2 / ZIO code. Correctness rests on property tests against a
+reference interpreter, not on mechanised proofs (strymonas proves its laws in Agda).
+
 ## Parallel tier
 
 `Strom.parallel` / `parallelFold` / `parallelKeyed` compile a one-input pipeline into a
@@ -168,6 +180,11 @@ parallelism, queue sizes, budgets and thread kinds), all against the reference i
 * `MethodSizeSuite`: parses the compiled class files and asserts that no generated method
   reaches 8000 bytes. It includes deliberately huge pipelines that must be split.
 * `SafetySuite`: poisoning, bounded work, bounded output, early termination.
+* `AllocationSuite`, `TupleSuite`: zero per-element allocation (measured with the JVM's
+  allocation counter), and no `Tuple2` / `Some` in the generated code for destructured tuples and
+  `mapAccumFilter` steps.
+* `ParallelPlanSuite`, `LoomParallelSuite`, `Fs2ParallelSuite`, `ZioParallelSuite`, `FusedSuite`,
+  `ZioFusedSuite`: parallel plans and fusion of plain fs2 / ZIO code against the reference.
 
 `sbt test` runs everything.
 

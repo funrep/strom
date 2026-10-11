@@ -134,15 +134,18 @@ JMH, Apple M1 (4 performance + 4 efficiency cores), JDK 23. **Lower is better.**
 Fused code is within ~1.5 ns of a hand-written loop. The gain applies to time spent in stream
 machinery: big for CPU-heavy pipelines, small for I/O-bound ones.
 
-**Scaling** (ns per element, ~20 ops per element):
+**Scaling** (ns per element, ~20 ops per element; one thread without any executor: 7.7):
 
 | workers | 1 | 2 | 4 | 8 |
 |---|---|---|---|---|
-| loom | 8.0 | 4.1 | 2.2 | 1.9 |
-| fs2 `fusedPar` | 8.3 | 4.7 | 2.9 | 2.8 |
+| loom | 8.8 | 4.5 | 2.5 | 2.0 |
+| fs2 `fusedPar` | 8.6 | 4.8 | 2.9 | 2.8 |
+| fs2 `fusedPar` + fold (partial folds) | 7.5 | 4.2 | 2.6 | 2.2 |
+| ZIO `fusedPar` | 8.6 | 4.7 | 3.0 | 3.1 |
 
-Near-linear up to 4 workers; the M1's other 4 cores are slower efficiency cores. ZIO and
-partial-fold plans are not benchmarked yet.
+Near-linear up to 4 workers (~3×); the M1's other 4 cores are slower efficiency cores, so 8
+adds little. Partial folds scale best of the stream executors: only one small result per chunk
+goes back through the stream.
 
 **Responsiveness** (lateness of a 1 ms timer while every core runs fused work):
 

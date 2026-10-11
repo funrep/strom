@@ -59,6 +59,15 @@ class Scaling:
         .filter(_ % 3 != 0).map(x => x * 17 + (x >>> 7)).map(x => x ^ (x << 5)).map(x => (x * 13) ^ (x >>> 11))
     ).chunks.map(_.size.toLong).compile.foldMonoid.unsafeRunSync()
 
+  /** The same work ending in an associative fold: per-chunk partial folds combined in order. */
+  @Benchmark def fs2Fold(): Long =
+    val in = _root_.fs2.Stream.emits(fs2Chunks).flatMap(_root_.fs2.Stream.chunk).covary[IO]
+    StromFs2.fusedPar(parallelism)(
+      in.map(x => x * 31 + 7).map(x => x ^ (x >>> 13)).map(x => x * 0x5bd1e995).map(x => x ^ (x >>> 15))
+        .filter(_ % 3 != 0).map(x => x * 17 + (x >>> 7)).map(x => x ^ (x << 5)).map(x => (x * 13) ^ (x >>> 11))
+        .fold(0)(_ + _)
+    ).compile.lastOrError.unsafeRunSync().toLong
+
   val zioChunks = chunks.map(zio.Chunk.fromArray(_))
 
   @Benchmark def zioPar(): Long =

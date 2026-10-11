@@ -1,5 +1,7 @@
 # Ström
 
+*Mostly written by Claude (Anthropic).*
+
 A bolt-on for **fs2** and **ZIO Streams** codebases: wrap an ordinary stream expression and its
 pure operators are fused, **at compile time**, into allocation-free loops, while effects and
 everything else run exactly as before. Built on staging (Scala 3 quotes) and Kiselyov et al.'s

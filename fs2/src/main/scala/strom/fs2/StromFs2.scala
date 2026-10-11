@@ -49,16 +49,16 @@ object StromFs2:
       val last = plan.tiers.foldLeft(fromElements(in)) { (s, tier) =>
         tier match
           case Tier.Replicated(f) =>
-            val pool = Pool(f, maxOut, budget)
+            val pool = SegmentPool(f, maxOut, budget)
             s.parEvalMap(parallelism)(c => cpu(pool.use(seg => Chunks.processStateless(seg, c))))
           case Tier.PartialFold(f, combine) =>
-            val pool = Pool(f, maxOut, budget)
+            val pool = SegmentPool(f, maxOut, budget)
             val partials = s.parEvalMap(parallelism)(c => cpu(pool.use(seg => Chunks.partialFold(seg, c))))
             Stream.eval(partials.compile.fold(Option.empty[Any])((acc, r) => Some(acc.fold(r)(combine(_, r))))
               .map(_.getOrElse(Chunks.end(f.create(maxOut, budget))._2)))
-              .map(singleton)
+              .map(ArrayChunk.single)
           case Tier.Single(f) =>
-            if f.isFold then foldChunks[F, Any](f.asInstanceOf[SegmentFactory[Any]], budget, Vector(s)).map(singleton)
+            if f.isFold then foldChunks[F, Any](f.asInstanceOf[SegmentFactory[Any]], budget, Vector(s)).map(ArrayChunk.single)
             else runChunks[F](f, maxOut, budget, Vector(s))
           case Tier.Keyed(f, partitioner) => keyed(s, f, partitioner, parallelism, maxOut, budget)
       }
@@ -85,18 +85,6 @@ object StromFs2:
     val out = drive[F](f, maxOut, budget, ins, Option(cede.asInstanceOf[F[Unit]]))
     if f.isFold then out.map(c => java.lang.reflect.Array.get(c.array, c.offset).asInstanceOf[B])
     else toElements(out)
-
-  private def singleton(x: Any): ArrayChunk = ArrayChunk(Array[Any](x), 0, 1)
-
-  /** Segments reused across chunks by concurrent tasks (a stateless instance carries no state
-   *  between chunks, so any free instance will do). */
-  private final class Pool(f: SegmentFactory[?], maxOut: Int, budget: Int):
-    private val free = java.util.concurrent.ConcurrentLinkedQueue[Segment]()
-    def use[X](body: Segment => X): X =
-      val seg = Option(free.poll()).getOrElse(f.create(maxOut, budget))
-      val x = body(seg)
-      free.offer(seg) // only returned on success: a poisoned instance is dropped
-      x
 
   private def keyed[F[_]: Async](s: Stream[F, ArrayChunk], f: SegmentFactory[?], partitioner: Partitioner,
       n: Int, maxOut: Int, budget: Int): Stream[F, ArrayChunk] =
@@ -169,13 +157,13 @@ object StromFs2:
                     go(legs.updated(p, Leg.Finished()))
                 }
           case Runner.Emit =>
-            Pull.output1(copyOut(runner)) >> go(legs)
+            Pull.output1(ArrayChunk.copyOut(runner)) >> go(legs)
           case Runner.Yield =>
             cede match
               case Some(c) => Pull.eval(c) >> go(legs)
               case None    => go(legs)
           case Runner.Done =>
-            if runner.isFold then Pull.output1(singleton(runner.result)) else Pull.done
+            if runner.isFold then Pull.output1(ArrayChunk.single(runner.result)) else Pull.done
       }
 
       def offer(p: Int, c: ArrayChunk): Unit = runner.offer(p, c.array, c.offset, c.length)
@@ -187,11 +175,3 @@ object StromFs2:
     case Start(s: Stream[F, ArrayChunk])
     case Going(leg: Stream.StepLeg[F, ArrayChunk], pending: Chunk[ArrayChunk])
     case Finished()
-
-  /** Copies the output buffer into a fresh array of the same primitive type. */
-  private def copyOut(runner: Runner[?]): ArrayChunk =
-    val src = runner.outArray
-    val n = runner.outLength
-    val dst = java.lang.reflect.Array.newInstance(src.getClass.getComponentType, n)
-    System.arraycopy(src, runner.outOffset, dst, 0, n)
-    ArrayChunk(dst, 0, n)

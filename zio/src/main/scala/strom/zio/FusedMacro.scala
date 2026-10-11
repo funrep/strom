@@ -2,10 +2,9 @@ package strom.zio
 
 import strom.runtime.Segment
 import scala.quoted.*
-import scala.reflect.ClassTag
 import _root_.zio.Trace
 import _root_.zio.stream.ZStream
-import strom.internal.{ChainFuser, Codegen, Pipe}
+import strom.internal.{ChainFuser, Pipe}
 
 private[zio] object FusedMacro:
   def fused[S: Type](stream: Expr[S])(using Quotes): Expr[S] =
@@ -24,13 +23,7 @@ private[zio] final class ZioFuser(using Quotes) extends ChainFuser:
   protected val streamClass = Symbol.requiredClass("zio.stream.ZStream")
   private val StreamModule = Symbol.requiredModule("zio.stream.ZStream")
 
-  private def args(t: TypeRepr): List[TypeRepr] = t.widen.dealias match
-    case AppliedType(_, as) => as
-    case other => report.errorAndAbort(s"strom: unexpected stream type ${other.show}")
-  protected def elemOf(t: TypeRepr): TypeRepr = args(t)(2)
-
-  protected def maxInputs = strom.runtime.Segment.MaxPorts
-  protected def sourcesSupported = true
+  protected def elemOf(t: TypeRepr): TypeRepr = typeArgs(t)(2)
 
   // ZStream operators take an implicit Trace as their last argument list.
   protected def pureOp(c: Call): Option[PureOp] = (c.name, c.argss) match
@@ -57,16 +50,9 @@ private[zio] final class ZioFuser(using Quotes) extends ChainFuser:
    *  the run's last call. */
   protected def emit(r: Run, sink: Pipe.Sink): Term =
     val last = r.calls.last.term
-    val List(rT, eT, bT) = args(last.tpe): @unchecked
-    val factory = bT.asType match
-      case '[b] => Codegen.segment[b](sink, r.inputs.toList.map(_._2.asType))
-    val inputs = '{ Vector[Any](${ Varargs(r.inputs.map(_._1.asExpr)) }*) }
-    val tags = '{ Vector[ClassTag[?]](${ Varargs(r.inputs.map((_, t) => classTag(t))) }*) }
+    val List(rT, eT, bT) = typeArgs(last.tpe): @unchecked
     val trace = Expr.summon[Trace].getOrElse(report.errorAndAbort("strom: no zio.Trace"))
     val call = Select.unique(Ref(Symbol.requiredModule("strom.zio.StromZio")), "fusedRun").appliedToTypes(List(rT, eT, bT))
-      .appliedToArgs(List(factory.asTerm, inputs.asTerm, tags.asTerm, Literal(IntConstant(strom.runtime.Segment.DefaultMaxOut)), Literal(IntConstant(strom.runtime.Segment.DefaultBudget))))
+      .appliedToArgs(runArgs(r, sink, bT) ++ List(Literal(IntConstant(Segment.DefaultMaxOut)), Literal(IntConstant(Segment.DefaultBudget))))
       .appliedToArgs(List(trace.asTerm))
     Typed(call, Inferred(last.tpe))
-
-  private def classTag(t: TypeRepr): Expr[ClassTag[?]] = t.asType match
-    case '[a] => Expr.summon[ClassTag[a]].getOrElse(report.errorAndAbort(s"strom: no ClassTag for ${t.show}"))

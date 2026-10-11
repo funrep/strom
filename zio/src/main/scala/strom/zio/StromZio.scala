@@ -55,30 +55,19 @@ object StromZio:
       val last = plan.tiers.foldLeft(fromElements[R, E, Any](in, summon[ClassTag[A]].asInstanceOf[ClassTag[Any]])) { (s, tier) =>
         tier match
           case Tier.Replicated(f) =>
-            val pool = Pool(f, maxOut, budget)
+            val pool = SegmentPool(f, maxOut, budget)
             s.mapZIOPar(parallelism)(c => cpu(pool.use(seg => Chunks.processStateless(seg, c))))
           case Tier.PartialFold(f, combine) =>
-            val pool = Pool(f, maxOut, budget)
+            val pool = SegmentPool(f, maxOut, budget)
             ZStream.fromZIO(
               s.mapZIOPar(parallelism)(c => cpu(pool.use(seg => Chunks.partialFold(seg, c))))
                 .runFold(Option.empty[Any])((acc, r) => Some(acc.fold(r)(combine(_, r))))
                 .map(_.getOrElse(Chunks.end(f.create(maxOut, budget))._2))
-            ).map(singleton)
+            ).map(ArrayChunk.single)
           case Tier.Single(f) => driveChunks[R, E](f, maxOut, budget, Vector(s))
           case Tier.Keyed(f, partitioner) => keyed(s, f, partitioner, parallelism, maxOut, budget)
       }
       toElements(last)
-
-  private def singleton(x: Any): ArrayChunk = ArrayChunk(Array[Any](x), 0, 1)
-
-  /** Stateless instances reused across chunks by concurrent tasks. */
-  private final class Pool(f: SegmentFactory[?], maxOut: Int, budget: Int):
-    private val free = java.util.concurrent.ConcurrentLinkedQueue[Segment]()
-    def use[X](body: Segment => X): X =
-      val seg = Option(free.poll()).getOrElse(f.create(maxOut, budget))
-      val x = body(seg)
-      free.offer(seg) // only returned on success: a poisoned instance is dropped
-      x
 
   private def keyed[R, E](s: ZStream[R, E, ArrayChunk], f: SegmentFactory[?], partitioner: Partitioner, n: Int,
       maxOut: Int, budget: Int)(using Trace): ZStream[R, E, ArrayChunk] =
@@ -138,22 +127,15 @@ object StromZio:
                     case Some(e) => ZIO.fail(Some(e))
                   },
                   chunk => { pending(p) = chunk; loop })
-            case Runner.Emit => ZIO.succeed(Chunk.single(copyOutChunk(runner)))
+            case Runner.Emit => ZIO.succeed(Chunk.single(ArrayChunk.copyOut(runner)))
             case Runner.Yield => ZIO.yieldNow *> loop
             case Runner.Done =>
               done = true
-              if runner.isFold then ZIO.succeed(Chunk.single(singleton(runner.result))) else ZIO.fail(None)
+              if runner.isFold then ZIO.succeed(Chunk.single(ArrayChunk.single(runner.result))) else ZIO.fail(None)
         }
         ZStream.repeatZIOChunkOption(loop)
       }
     }
-
-  private def copyOutChunk(runner: Runner[?]): ArrayChunk =
-    val src = runner.outArray
-    val n = runner.outLength
-    val dst = java.lang.reflect.Array.newInstance(src.getClass.getComponentType, n)
-    System.arraycopy(src, runner.outOffset, dst, 0, n)
-    ArrayChunk(dst, 0, n)
 
   /** The chunk as an array of its primitive element type (generic, so no `Object[]` cast). */
   private def primitiveArray[A](c: Chunk[A], tag: ClassTag[A]): AnyRef = c.toArray(using tag)
@@ -177,7 +159,7 @@ object StromZio:
               _ => ZChannel.suspend { runner.endOfInput(0); go() },
             )
           case Runner.Emit =>
-            ZChannel.write(copyOut(runner)) *> ZChannel.suspend(go())
+            ZChannel.write(Chunk.fromArray(ArrayChunk.copyOut(runner).array.asInstanceOf[Array[O]])) *> ZChannel.suspend(go())
           case Runner.Yield =>
             ZChannel.fromZIO(ZIO.yieldNow) *> ZChannel.suspend(go())
           case Runner.Done =>
@@ -185,10 +167,3 @@ object StromZio:
 
       go()
     }
-
-  private def copyOut[O](runner: Runner[O]): Chunk[O] =
-    val src = runner.outArray
-    val n = runner.outLength
-    val dst = java.lang.reflect.Array.newInstance(src.getClass.getComponentType, n)
-    System.arraycopy(src, runner.outOffset, dst, 0, n)
-    Chunk.fromArray(dst.asInstanceOf[Array[O]])

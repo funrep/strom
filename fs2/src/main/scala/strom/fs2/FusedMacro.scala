@@ -2,8 +2,7 @@ package strom.fs2
 
 import strom.runtime.Segment
 import scala.quoted.*
-import scala.reflect.ClassTag
-import strom.internal.{ChainFuser, Codegen, Pipe}
+import strom.internal.{ChainFuser, Pipe}
 
 private[fs2] object FusedMacro:
   def fused[S: Type](stream: Expr[S])(using Quotes): Expr[S] =
@@ -24,14 +23,8 @@ private[fs2] final class Fs2Fuser(using Quotes) extends ChainFuser:
   private val StreamModule = Symbol.requiredModule("fs2.Stream")
   private val verbose = System.getProperty("strom.verbose") != null
 
-  private def args(t: TypeRepr): List[TypeRepr] = t.widen.dealias match
-    case AppliedType(_, as) => as
-    case other => report.errorAndAbort(s"strom: unexpected stream type ${other.show}")
-  protected def elemOf(t: TypeRepr): TypeRepr = args(t)(1)
-  private def effectOf(t: TypeRepr): TypeRepr = args(t)(0)
-
-  protected def maxInputs = strom.runtime.Segment.MaxPorts
-  protected def sourcesSupported = true
+  protected def elemOf(t: TypeRepr): TypeRepr = typeArgs(t)(1)
+  private def effectOf(t: TypeRepr): TypeRepr = typeArgs(t)(0)
 
   protected def pureOp(c: Call): Option[PureOp] = (c.name, c.argss) match
     case ("map", List(List(f)))                => Some(PureOp.Map(f))
@@ -67,10 +60,6 @@ private[fs2] final class Fs2Fuser(using Quotes) extends ChainFuser:
   protected def emit(r: Run, sink: Pipe.Sink): Term =
     val last = r.calls.last.term
     val (fRepr, bRepr) = (effectOf(last.tpe), elemOf(last.tpe))
-    val factory = bRepr.asType match
-      case '[b] => Codegen.segment[b](sink, r.inputs.toList.map(_._2.asType))
-    val inputs = '{ Vector[Any](${ Varargs(r.inputs.map(_._1.asExpr)) }*) }
-    val tags = '{ Vector[ClassTag[?]](${ Varargs(r.inputs.map((_, t) => classTag(t))) }*) }
     val spawn = Symbol.requiredClass("cats.effect.kernel.GenSpawn").typeRef.appliedTo(List(fRepr, TypeRepr.of[Throwable]))
     val (cede, cedes) = Implicits.search(spawn) match
       case s: ImplicitSearchSuccess => (Select.unique(s.tree, "cede"), true)
@@ -78,7 +67,4 @@ private[fs2] final class Fs2Fuser(using Quotes) extends ChainFuser:
     if !cedes then log(log.size - 1) += ", never cedes"
     if verbose then report.info(s"strom: ${log.last}", last.pos)
     Select.unique(Ref(Symbol.requiredModule("strom.fs2.StromFs2")), "fusedRun").appliedToTypes(List(fRepr, bRepr))
-      .appliedToArgs(List(factory.asTerm, inputs.asTerm, tags.asTerm, cede, Literal(IntConstant(strom.runtime.Segment.DefaultMaxOut)), Literal(IntConstant(strom.runtime.Segment.DefaultBudget))))
-
-  private def classTag(t: TypeRepr): Expr[ClassTag[?]] = t.asType match
-    case '[a] => Expr.summon[ClassTag[a]].getOrElse(report.errorAndAbort(s"strom: no ClassTag for ${t.show}"))
+      .appliedToArgs(runArgs(r, sink, bRepr) ++ List(cede, Literal(IntConstant(Segment.DefaultMaxOut)), Literal(IntConstant(Segment.DefaultBudget))))

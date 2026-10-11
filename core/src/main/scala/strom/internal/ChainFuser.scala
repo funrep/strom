@@ -1,6 +1,7 @@
 package strom.internal
 
 import scala.quoted.*
+import scala.reflect.ClassTag
 
 /** Fusion of ordinary stream-library code (fs2, ZIO, …): decomposes a receiver chain
  *  `src.op1(..).op2(..)…`, groups maximal runs of pure operators into [[Pipe]]s and replaces each
@@ -40,14 +41,25 @@ abstract class ChainFuser(using val q: Quotes):
   protected def pureOp(c: Call): Option[PureOp]
   /** `range(from, until)` over Ints, as a source. */
   protected def intRange(t: Term): Option[(Expr[Int], Expr[Int])]
-  /** Maximum number of inputs a fused run may have (zipWith adds inputs). */
-  protected def maxInputs: Int
-  /** Whether a run may start from a range source with no input stream. */
-  protected def sourcesSupported: Boolean
   /** Code running the compiled segment of `run`, typed like `run.calls.last.term`. */
   protected def emit(run: Run, sink: Pipe.Sink): Term
 
   // ------------------------------------------------------------------ machinery
+
+  /** Type arguments of a stream type. */
+  protected def typeArgs(t: TypeRepr): List[TypeRepr] = t.widen.dealias match
+    case AppliedType(_, as) => as
+    case other => report.errorAndAbort(s"strom: unexpected stream type ${other.show}")
+
+  /** The leading arguments of an adapter's `fusedRun`: the segment factory for `sink` (with
+   *  output type `out`), the input streams, and their element class tags. */
+  protected def runArgs(r: Run, sink: Pipe.Sink, out: TypeRepr): List[Term] =
+    val factory = out.asType match
+      case '[b] => Codegen.segment[b](sink, r.inputs.toList.map(_._2.asType))
+    val tags = r.inputs.map((_, t) => t.asType match
+      case '[a] => Expr.summon[ClassTag[a]].getOrElse(report.errorAndAbort(s"strom: no ClassTag for ${t.show}")))
+    List(factory.asTerm, '{ Vector[Any](${ Varargs(r.inputs.map(_._1.asExpr)) }*) }.asTerm,
+      '{ Vector[ClassTag[?]](${ Varargs(tags) }*) }.asTerm)
 
   private val front = Frontend()
   /** One line per fused run. */
@@ -183,14 +195,14 @@ abstract class ChainFuser(using val q: Quotes):
     }
 
     def canAdd(o: PureOp): Boolean = o match
-      case _: PureOp.ZipWith | _: PureOp.Zip => run.forall(_.inputs.size < maxInputs)
+      case _: PureOp.ZipWith | _: PureOp.Zip => run.forall(_.inputs.size < strom.runtime.Segment.MaxPorts)
       case _ => true
 
     for c <- calls do
       op(c) match
-        case Some(o) if canAdd(o) && (run.isDefined || intRange(current).isEmpty || sourcesSupported) =>
+        case Some(o) if canAdd(o) =>
           val r = run.getOrElse {
-            val started = intRange(current).filter(_ => sourcesSupported) match
+            val started = intRange(current) match
               case Some((from, until)) => Run(current, Pipe.SrcRange(from, until), Vector.empty)
               case None =>
                 elemOf(current.tpe).asType match

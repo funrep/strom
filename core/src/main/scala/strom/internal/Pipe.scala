@@ -26,16 +26,31 @@ object Pipe:
   final case class SrcRange(from: Expr[Int], until: Expr[Int])(using Type[Int]) extends Pipe[Int]
   /** An input port of a resumable segment. */
   final case class SrcPort[A: Type](port: Int) extends Pipe[A]
-  final case class MapP[A, B: Type](up: Pipe[A], f: Fn1[A, B]) extends Pipe[B]
-  final case class FilterP[A: Type](up: Pipe[A], p: Fn1[A, Boolean]) extends Pipe[A]
-  final case class FlatMapP[A, B: Type](up: Pipe[A], f: Inner[A, B]) extends Pipe[B]
-  final case class TakeP[A: Type](up: Pipe[A], n: Expr[Long]) extends Pipe[A]
   final case class ZipWithP[A, B, C: Type](l: Pipe[A], r: Pipe[B], f: Fn2[A, B, C]) extends Pipe[C]
-  final case class CollectP[A, B: Type](up: Pipe[A], pf: Partial[A, B]) extends Pipe[B]
-  final case class MapOptionP[A, B: Type](up: Pipe[A], f: Fn1[A, Option[B]]) extends Pipe[B]
-  final case class ZipWithIndexP[A](up: Pipe[A])(using Type[(A, Long)]) extends Pipe[(A, Long)]
-  final case class ScanP[A, S: Type](up: Pipe[A], z: Expr[S], op: Fn2[S, A, S]) extends Pipe[S]
-  final case class DropP[A: Type](up: Pipe[A], n: Expr[Long]) extends Pipe[A]
+
+  /** An operator with one upstream; `withUp` is the same operator over another upstream. */
+  sealed abstract class Unary[A, B: Type] extends Pipe[B]:
+    def up: Pipe[A]
+    def withUp(u: Pipe[A]): Pipe[B]
+
+  final case class MapP[A, B: Type](up: Pipe[A], f: Fn1[A, B]) extends Unary[A, B]:
+    def withUp(u: Pipe[A]) = copy(up = u)
+  final case class FilterP[A: Type](up: Pipe[A], p: Fn1[A, Boolean]) extends Unary[A, A]:
+    def withUp(u: Pipe[A]) = copy(up = u)
+  final case class FlatMapP[A, B: Type](up: Pipe[A], f: Inner[A, B]) extends Unary[A, B]:
+    def withUp(u: Pipe[A]) = copy(up = u)
+  final case class TakeP[A: Type](up: Pipe[A], n: Expr[Long]) extends Unary[A, A]:
+    def withUp(u: Pipe[A]) = copy(up = u)
+  final case class CollectP[A, B: Type](up: Pipe[A], pf: Partial[A, B]) extends Unary[A, B]:
+    def withUp(u: Pipe[A]) = copy(up = u)
+  final case class MapOptionP[A, B: Type](up: Pipe[A], f: Fn1[A, Option[B]]) extends Unary[A, B]:
+    def withUp(u: Pipe[A]) = copy(up = u)
+  final case class ZipWithIndexP[A](up: Pipe[A])(using Type[(A, Long)]) extends Unary[A, (A, Long)]:
+    def withUp(u: Pipe[A]) = copy(up = u)
+  final case class ScanP[A, S: Type](up: Pipe[A], z: Expr[S], op: Fn2[S, A, S]) extends Unary[A, S]:
+    def withUp(u: Pipe[A]) = copy(up = u)
+  final case class DropP[A: Type](up: Pipe[A], n: Expr[Long]) extends Unary[A, A]:
+    def withUp(u: Pipe[A]) = copy(up = u)
   /** How a `MapAccumP` step's result encodes the output. */
   enum AccumOut:
     /** `(S, Option[B])`: emit when defined. */
@@ -45,11 +60,15 @@ object Pipe:
     /** `(S, B)`: always emit the pair `(S', B)` (fs2 `mapAccumulate`). */
     case PairOut
   final case class MapAccumP[A, S, B: Type](up: Pipe[A], z: Expr[S], f: Fn2[S, A, Any], out: AccumOut)(
-      using val stateTpe: Type[S]) extends Pipe[B]
-  final case class TakeWhileP[A: Type](up: Pipe[A], p: Fn1[A, Boolean]) extends Pipe[A]
-  final case class DropWhileP[A: Type](up: Pipe[A], p: Fn1[A, Boolean]) extends Pipe[A]
+      using val stateTpe: Type[S]) extends Unary[A, B]:
+    def withUp(u: Pipe[A]) = copy(up = u)
+  final case class TakeWhileP[A: Type](up: Pipe[A], p: Fn1[A, Boolean]) extends Unary[A, A]:
+    def withUp(u: Pipe[A]) = copy(up = u)
+  final case class DropWhileP[A: Type](up: Pipe[A], p: Fn1[A, Boolean]) extends Unary[A, A]:
+    def withUp(u: Pipe[A]) = copy(up = u)
   final case class WindowFoldP[A, S: Type](up: Pipe[A], size: Expr[Int], z: Expr[S], op: Fn2[S, A, S])
-      extends Pipe[S]
+      extends Unary[A, S]:
+    def withUp(u: Pipe[A]) = copy(up = u)
 
   /** What happens to the elements at the end of the pipeline. */
   sealed abstract class Sink
@@ -88,32 +107,10 @@ object Pipe:
     case _: DropWhileP[?]         => StageInfo("dropWhile", stateless = false, Cardinality.AtMostOne)
 
   /** Pre-order listing of the operators of a pipeline. */
-  def stages(p: Pipe[?]): List[StageInfo] = p match
-    case _: SrcArray[?] | _: SrcRange | _: SrcPort[?] => List(stageInfo(p))
-    case MapP(up, _)                => stages(up) :+ stageInfo(p)
-    case FilterP(up, _)             => stages(up) :+ stageInfo(p)
-    case FlatMapP(up, _)            => stages(up) :+ stageInfo(p)
-    case TakeP(up, _)               => stages(up) :+ stageInfo(p)
-    case ZipWithP(l, r, _)          => (stages(l) ++ stages(r)) :+ stageInfo(p)
-    case WindowFoldP(up, _, _, _)   => stages(up) :+ stageInfo(p)
-    case _ => stages(child(p)) :+ stageInfo(p)
-
-  /** The upstream of a unary operator. */
-  def child(p: Pipe[?]): Pipe[?] = p match
-    case MapP(up, _) => up
-    case FilterP(up, _) => up
-    case FlatMapP(up, _) => up
-    case TakeP(up, _) => up
-    case WindowFoldP(up, _, _, _) => up
-    case CollectP(up, _) => up
-    case MapOptionP(up, _) => up
-    case ZipWithIndexP(up) => up
-    case ScanP(up, _, _) => up
-    case DropP(up, _) => up
-    case m: MapAccumP[?, ?, ?] => m.up
-    case TakeWhileP(up, _) => up
-    case DropWhileP(up, _) => up
-    case other => throw IllegalArgumentException(s"not a unary operator: $other")
+  def stages(p: Pipe[?]): List[StageInfo] = (p match
+    case u: Unary[?, ?]    => stages(u.up)
+    case ZipWithP(l, r, _) => stages(l) ++ stages(r)
+    case _                 => Nil) :+ stageInfo(p)
 
   def planInfo(sink: Sink, inputs: Int): PlanInfo = sink match
     case f: FoldSink[?, ?] =>

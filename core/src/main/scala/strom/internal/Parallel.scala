@@ -17,54 +17,11 @@ object Parallel:
   def replace(p: Pipe[?], target: Pipe[?], repl: Pipe[?])(using Quotes): Pipe[?] =
     if p eq target then repl
     else p match
-      case m: MapP[a, b] =>
-        given Type[b] = m.tpe
-        MapP[a, b](replace(m.up, target, repl).asInstanceOf[Pipe[a]], m.f)
-      case m: FilterP[a] =>
-        given Type[a] = m.tpe
-        FilterP[a](replace(m.up, target, repl).asInstanceOf[Pipe[a]], m.p)
-      case m: FlatMapP[a, b] =>
-        given Type[b] = m.tpe
-        FlatMapP[a, b](replace(m.up, target, repl).asInstanceOf[Pipe[a]], m.f)
-      case m: TakeP[a] =>
-        given Type[a] = m.tpe
-        TakeP[a](replace(m.up, target, repl).asInstanceOf[Pipe[a]], m.n)
-      case m: WindowFoldP[a, s] =>
-        given Type[s] = m.tpe
-        WindowFoldP[a, s](replace(m.up, target, repl).asInstanceOf[Pipe[a]], m.size, m.z, m.op)
-      case m: CollectP[a, b] =>
-        given Type[b] = m.tpe
-        CollectP[a, b](replace(m.up, target, repl).asInstanceOf[Pipe[a]], m.pf)
-      case m: MapOptionP[a, b] =>
-        given Type[b] = m.tpe
-        MapOptionP[a, b](replace(m.up, target, repl).asInstanceOf[Pipe[a]], m.f)
-      case m: ZipWithIndexP[a] =>
-        given Type[(a, Long)] = m.tpe
-        ZipWithIndexP[a](replace(m.up, target, repl).asInstanceOf[Pipe[a]])
-      case m: ScanP[a, s] =>
-        given Type[s] = m.tpe
-        ScanP[a, s](replace(m.up, target, repl).asInstanceOf[Pipe[a]], m.z, m.op)
-      case m: MapAccumP[a, s, b] =>
-        given Type[b] = m.tpe
-        MapAccumP[a, s, b](replace(m.up, target, repl).asInstanceOf[Pipe[a]], m.z, m.f, m.out)(using m.tpe, m.stateTpe)
-      case m: DropP[a] =>
-        given Type[a] = m.tpe
-        DropP[a](replace(m.up, target, repl).asInstanceOf[Pipe[a]], m.n)
-      case m: TakeWhileP[a] =>
-        given Type[a] = m.tpe
-        TakeWhileP[a](replace(m.up, target, repl).asInstanceOf[Pipe[a]], m.p)
-      case m: DropWhileP[a] =>
-        given Type[a] = m.tpe
-        DropWhileP[a](replace(m.up, target, repl).asInstanceOf[Pipe[a]], m.p)
+      case u: Unary[a, b] => u.withUp(replace(u.up, target, repl).asInstanceOf[Pipe[a]])
       case m: ZipWithP[a, b, c] =>
         given Type[c] = m.tpe
         ZipWithP[a, b, c](replace(m.l, target, repl).asInstanceOf[Pipe[a]], replace(m.r, target, repl).asInstanceOf[Pipe[b]], m.f)
       case _ => p
-
-  private def replaceIn(sink: Sink, target: Pipe[?], repl: Pipe[?])(using Quotes): Sink = sink match
-    case fs: FoldSink[a, s] =>
-      FoldSink[a, s](replace(fs.up, target, repl).asInstanceOf[Pipe[a]], fs.z, fs.op, fs.associative, fs.combine)(using fs.tpe)
-    case es: EmitSink[a] => EmitSink[a](replace(es.up, target, repl).asInstanceOf[Pipe[a]])
 
   private def outType(sink: Sink): Type[?] = sink match
     case fs: FoldSink[?, ?] => fs.tpe
@@ -94,14 +51,15 @@ object Parallel:
     case _: SrcPort[?] => true
     case _: SrcArray[?] | _: SrcRange => false
     case ZipWithP(l, r, _) => containsPort(l) || containsPort(r)
-    case _ => containsPort(child(p))
+    case u: Unary[?, ?] => containsPort(u.up)
 
   /** The operators from the input port up to `p` (port first). A zip contributes itself; its
    *  other operand stays attached to it. */
   def pathNodes(p: Pipe[?]): List[Pipe[?]] = p match
     case _: SrcPort[?] => List(p)
     case z: ZipWithP[?, ?, ?] => (if containsPort(z.l) then pathNodes(z.l) else pathNodes(z.r)) :+ p
-    case _ => pathNodes(child(p)) :+ p
+    case u: Unary[?, ?] => pathNodes(u.up) :+ p
+    case other => throw IllegalArgumentException(s"no input port in $other")
 
   private enum Group:
     case Repl(from: Int, to: Int)   // inclusive node indices

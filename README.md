@@ -141,11 +141,11 @@ pipeline on the same data. Pipeline A: `map`/`filter` ×7 then sum. Pipeline B:
 | hand-written `while` loop (no library: the floor) | — | 4.6 / 0 | 3.0 / 0 |
 | `Strom.run` over arrays (Ström DSL) | yes | 4.7 / 0 | 3.2 / 0 |
 | plain fs2 code (the baseline) | no | 51 / 108 | 804 / 3269 |
-| **same fs2 code in `StromFs2.fused { … }`** | yes | **5.9 / 1.4** | **7.6 / 36** |
-| same fs2 code in `StromFs2.fusedPar(4) { … }` | yes, 4 cores | 2.9 / 5.6 | 17.5 / 79 |
+| **same fs2 code + `.fused`** | yes | **5.9 / 1.4** | **7.6 / 36** |
+| same fs2 code + `.fusedPar(4)` | yes, 4 cores | 2.9 / 5.6 | 17.5 / 79 |
 | plain ZStream code (the baseline) | no | 31 / 147 | 632 / 1525 |
-| **same ZStream code in `StromZio.fused { … }`** | yes | **9.5 / 20** | **17.7 / 70** |
-| same ZStream code in `StromZio.fusedPar(4) { … }` | yes, 4 cores | 4.0 / 25 | 15.8 / 134 |
+| **same ZStream code + `.fused`** | yes | **9.5 / 20** | **17.7 / 70** |
+| same ZStream code + `.fusedPar(4)` | yes, 4 cores | 4.0 / 25 | 15.8 / 134 |
 
 * Fused fs2 code is within ~1.5 ns (A) and ~5 ns (B) of a hand-written loop: ~8× and ~100×
   faster than plain fs2. The remaining gap is fs2 itself (chunk hand-off, the effect loop).

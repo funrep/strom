@@ -1,6 +1,6 @@
 # Ström
 
-*Mostly written by Claude (Anthropic).*
+*AI-generated code (Claude).*
 
 A bolt-on for **fs2** and **ZIO Streams** codebases: wrap an ordinary stream expression and its
 pure operators are fused, **at compile time**, into allocation-free loops, while effects and

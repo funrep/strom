@@ -152,19 +152,35 @@ outputs put back in order.
 
 ## Verification
 
-All pipelines are checked against a naive reference interpreter (or the plain unfused fs2/ZIO
-code) for random inputs, **random chunkings** and random work budgets down to 1. Also:
-random pipeline shapes compiled at test time, golden files of generated code, bytecode
-method-size checks and allocation measurements.
+Every check compares Ström's output with a trusted answer. There are two kinds, depending on
+the layer:
 
-`RealWorldSuite` (fs2 and ZIO) runs fused code next to real effects and compares it with the
-plain code: effect order, exceptions in lambdas and upstream failures, `bracket` / `Resource` /
-`acquireRelease` finalizers (also on early `take` and on failure), interruption and timeouts
-(including endless loops that never emit), infinite sources with `take`, `parJoin` /
-`parEvalMap` / `merge` / `concurrently` / `flatMapPar`, one fused stream run 64 times in
-parallel, `metered` / `groupWithin`, and pull-based consumers. One documented difference: when
-a lambda throws, elements already computed in the same chunk may be dropped (fs2's own chunked
-operators behave the same way). `sbt test` runs everything.
+* **The compiler (Strom DSL, segments, parallel plans)** is checked against a *reference
+  interpreter*: a ~30-line implementation of every operator on top of Scala iterators
+  (`Reference.scala`). It is written to be obviously correct, not fast. Each pipeline runs on
+  random inputs, cut into **random chunks** (including empty ones), with random output buffer
+  sizes and random work budgets down to 1, so every place a segment can stop and resume is
+  exercised. A further suite generates **random pipeline shapes**, compiles them at test time
+  with the same code generator, and checks those too.
+* **The fs2 / ZIO integration (`.fused`, `.fusedPar`)** is checked against the **same plain
+  fs2 / ZIO code without Ström**, which is the behaviour users already rely on. These tests
+  use random inputs, chunkings and worker counts.
+  `RealWorldSuite` adds real effects and compares output, the log of effects that ran, and
+  finalizers:
+  * effect order;
+  * exceptions in lambdas and upstream failures;
+  * `bracket` / `Resource` / `acquireRelease` finalizers, also on early `take` and on failure;
+  * interruption and timeouts, including endless loops that never emit;
+  * infinite sources with `take`;
+  * `parJoin`, `parEvalMap`, `merge`, `concurrently` and `flatMapPar`;
+  * one fused stream run 64 times in parallel;
+  * `metered`, `groupWithin`, and pull-based consumers.
+
+  One documented difference: when a lambda throws, elements already computed in the same
+  chunk may be dropped (fs2's own chunked operators behave the same way).
+
+Also: golden files of the generated code, bytecode checks that no generated method exceeds the
+JIT limit, and allocation measurements (no per-element garbage). `sbt test` runs everything.
 
 ## Numbers
 

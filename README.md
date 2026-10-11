@@ -290,11 +290,10 @@ request or I/O callback would see.
 
 1. Oleg Kiselyov, Aggelos Biboudis, Nick Palladinos, Yannis Smaragdakis. *Stream Fusion, to
    Completeness*. POPL 2017. [doi:10.1145/3009837](https://doi.org/10.1145/3009837)
-2. The later strymonas paper: a theory of stateful streams, with fusion by normalization-by-evaluation,
-   linear normal forms for zip, closure conversion of nested streams, and the equational laws
-   proved in Agda. Implementation, derivations and proofs:
-   [github.com/strymonas/strymonas-ocaml](https://github.com/strymonas/strymonas-ocaml)
-   (`lib/derivation.ml`, `lib/Derivation.agda`, `lib/intuition.ml`).
+2. Oleg Kiselyov, Tomoaki Kobayashi, Nick Palladinos. *Complete Fusion for Stateful Streams:
+   Equational Theory of Stateful Streams and Fusion as Normalization-by-Evaluation*. TOPLAS.
+   [arXiv:2412.15768](https://arxiv.org/abs/2412.15768). Implementation, derivations and Agda
+   proofs: [github.com/strymonas/strymonas-ocaml](https://github.com/strymonas/strymonas-ocaml).
 3. Tomoaki Kobayashi, Oleg Kiselyov. *Complete Stream Fusion for Software-Defined Radio*.
    PEPM 2024. [doi:10.1145/3635800.3636962](https://doi.org/10.1145/3635800.3636962)
 

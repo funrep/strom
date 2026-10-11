@@ -28,6 +28,23 @@ class Representative:
   def zioOf(xs: Array[Int]) = zio.stream.ZStream.fromChunks(xs.grouped(4096).toVector.map(zio.Chunk.fromArray(_))*)
   val segment = Strom.segment(Pipelines.representative(N))
 
+  /** The same pipeline written by hand: the inner range's position and the filtered side's
+   *  cursor kept in locals. */
+  @Benchmark def whileLoop(): Int =
+    var acc = 0; var n = 0
+    var ia = 0; var j = 0; var lim = 0 // left: a(ia - 1) expanded to 0 until lim
+    var ib = 0                         // right: next index into b
+    var going = true
+    while going && n < N do
+      while j >= lim && ia < a.length do { lim = a(ia); ia += 1; j = 0 }
+      if j >= lim then going = false
+      else
+        val x = j; j += 1
+        while ib < b.length && b(ib) % 2 != 0 do ib += 1
+        if ib >= b.length then going = false
+        else { acc += x * b(ib); ib += 1; n += 1 }
+    acc
+
   @Benchmark def stromDirect(): Int =
     Strom.run(Strom.fromArray(a).flatMap(x => Strom.range(0, x))
       .zipWith(Strom.fromArray(b).filter(y => y % 2 == 0))(_ * _).take(N).sum)

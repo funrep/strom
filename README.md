@@ -121,20 +121,23 @@ method-size checks and allocation measurements. `sbt test` runs everything.
 
 JMH, Apple M1 (4 performance + 4 efficiency cores), JDK 23. **Lower is better.**
 
-**Throughput** (ns per element / bytes of garbage per element):
+**Throughput** (ns per element / bytes of garbage per element). Every row computes the same
+pipeline on the same data. Pipeline A: `map`/`filter` ×7 then sum. Pipeline B:
+`a.flatMap(x => range(0, x)).zipWith(b.filter(even))(_ * _).take(n).sum`.
 
-| | 7 cheap stages + sum | flatMap + zip + filter + take + sum |
-|---|---|---|
-| hand-written `while` loop | 4.6 / 0 | — |
-| `Strom.run` | 4.7 / 0 | 3.3 / 0 |
-| **fs2 code in `StromFs2.fused`** | **5.9 / 1.4** | **7.6 / 36** |
-| fs2 code in `StromFs2.fusedPar(4)` | 2.9 / 5.6 | 17.5 / 79 |
-| plain fs2 | 51 / 108 | 804 / 3269 |
-| **ZStream code in `StromZio.fused`** | **9.5 / 20** | **17.7 / 70** |
-| ZStream code in `StromZio.fusedPar(4)` | 4.0 / 25 | 15.8 / 134 |
-| plain ZStream | 31 / 147 | 632 / 1525 |
+| Row | Fused? | A | B |
+|---|---|---|---|
+| hand-written `while` loop (no library: the floor) | — | 4.6 / 0 | 3.0 / 0 |
+| `Strom.run` over arrays (Ström DSL) | yes | 4.7 / 0 | 3.2 / 0 |
+| plain fs2 code (the baseline) | no | 51 / 108 | 804 / 3269 |
+| **same fs2 code in `StromFs2.fused { … }`** | yes | **5.9 / 1.4** | **7.6 / 36** |
+| same fs2 code in `StromFs2.fusedPar(4) { … }` | yes, 4 cores | 2.9 / 5.6 | 17.5 / 79 |
+| plain ZStream code (the baseline) | no | 31 / 147 | 632 / 1525 |
+| **same ZStream code in `StromZio.fused { … }`** | yes | **9.5 / 20** | **17.7 / 70** |
+| same ZStream code in `StromZio.fusedPar(4) { … }` | yes, 4 cores | 4.0 / 25 | 15.8 / 134 |
 
-* Fused fs2 code is within ~1.5 ns of a hand-written loop: ~8× and ~100× faster than plain fs2.
+* Fused fs2 code is within ~1.5 ns (A) and ~5 ns (B) of a hand-written loop: ~8× and ~100×
+  faster than plain fs2. The remaining gap is fs2 itself (chunk hand-off, the effect loop).
 * Fused ZStream code is ~3× and ~35× faster than plain ZStream. It's slower than fs2 here
   because the benchmark ends in `runSum`, a ZIO sink that isn't fused (it boxes each element).
 * `fusedPar(4)` doubles the speed of the simple pipeline. On the zip pipeline it loses for

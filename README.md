@@ -37,9 +37,14 @@ Scala 3.9, JDK 21+.
 StromFs2.fused { in.map(f).filter(p).evalMap(save).map(g).take(100L) }
 StromZio.fused { in.map(f).filter(p).mapZIO(save).map(g) }
 StromFs2.fusedPlan(…)   // compile-time string: "fused: map → filter … / kept: evalMap"
+
+import strom.fs2.*      // or strom.zio.*: the same as methods
+in.map(f).filter(p).evalMap(save).map(g).take(100L).fused   // .fusedPar(n), .fusedPlan
 ```
 
-Each run of pure operators becomes one compiled segment; everything else stays as written.
+The result has exactly the type you passed in (`Stream[IO, A]`, `ZStream[R, E, A]`); no Ström
+types appear in your code. Each run of pure operators becomes one compiled segment; everything
+else stays as written.
 
 * **fs2:** `map`, `filter`, `collect`, `mapFilter`, `take`, `drop`, `takeWhile`, `dropWhile`,
   `zipWithIndex`, `scan`, `mapAccumulate`, `fold`, `foldMonoid`, `zip`, `zipWith`, and `flatMap`
@@ -115,7 +120,16 @@ Strom.showCode(…) / Strom.explain(…)      // generated code / IR shape, at c
 All pipelines are checked against a naive reference interpreter (or the plain unfused fs2/ZIO
 code) for random inputs, **random chunkings** and random work budgets down to 1. Also:
 random pipeline shapes compiled at test time, golden files of generated code, bytecode
-method-size checks and allocation measurements. `sbt test` runs everything.
+method-size checks and allocation measurements.
+
+`RealWorldSuite` (fs2 and ZIO) runs fused code next to real effects and compares it with the
+plain code: effect order, exceptions in lambdas and upstream failures, `bracket` / `Resource` /
+`acquireRelease` finalizers (also on early `take` and on failure), interruption and timeouts
+(including endless loops that never emit), infinite sources with `take`, `parJoin` /
+`parEvalMap` / `merge` / `concurrently` / `flatMapPar`, one fused stream run 64 times in
+parallel, `metered` / `groupWithin`, and pull-based consumers. One documented difference: when
+a lambda throws, elements already computed in the same chunk may be dropped (fs2's own chunked
+operators behave the same way). `sbt test` runs everything.
 
 ## Numbers
 

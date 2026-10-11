@@ -103,14 +103,52 @@ Strom.showCode(…) / Strom.explain(…)      // generated code / IR shape, at c
 
 ## How it works
 
-* **Frontend:** a macro reads the source of the wrapped expression into a pipeline IR, with
-  lambdas substituted in place.
-* **Kiselyov IR:** producers (`For` / `Unfold`) in linear or nested streams; `take` is pushed
-  into every loop, and zip picks the cheapest strategy, following strymonas.
-* **Two backends:** nested `while` loops (direct mode), and a flag-per-level form whose state
-  lives in fields, so a segment can stop at any element and resume.
-* **Method splitting:** generated methods stay under HotSpot's 8000-byte JIT limit.
-* **Runtime:** a sans-I/O runner drives segments; adapters feed it chunks.
+**What fusion is.** In plain fs2 or ZIO, every operator is a separate stage. Each element goes
+through a chain of objects: a closure call per operator, a new intermediate chunk per stage,
+and boxing (an `Int` becomes an `Integer`) because the stages are generic. Fusion compiles the
+whole chain into one loop instead, with your lambdas pasted in. For example
+
+```scala
+in.map(_ * 3).filter(_ % 2 == 0).take(100L).fold(0)(_ + _)
+```
+
+becomes, per input chunk, roughly
+
+```scala
+while (i < chunk.length && taken < 100) {
+  val x = chunk(i) * 3
+  if (x % 2 == 0) { acc += x; taken += 1 }
+  i += 1
+}
+```
+
+No closures, no intermediate chunks, no boxing: the JIT sees plain arithmetic on primitives.
+
+**The steps:**
+
+1. **Read the code.** `.fused` is a macro: at compile time it sees your expression's source,
+   splits it into runs of pure operators, and leaves everything else (effects, time,
+   concurrency) as written. That is why only code written inline can be fused.
+2. **Build loops.** Each run is translated into Kiselyov et al.'s stream IR: a source is
+   either indexed (an array, a range: a `for` loop) or stepped (an iterator, an input port: a
+   `while` loop). `flatMap` becomes a nested loop, `filter` an `if`, and `take` adds a counter
+   checked in every loop. `zip` is the hard case, because two loops must advance in step; the
+   generator picks the cheapest strategy (shared index, lock-step, or turning only the simpler
+   side into a pull), following strymonas.
+3. **Make it resumable.** fs2 and ZIO deliver input in chunks, and the consumer may want
+   output before the input ends. So the loop keeps its state (counters, positions,
+   accumulators) in fields of a small object, a *segment*, and can stop at any element and
+   continue later. Each `step()` runs until it needs the next input chunk, has a batch of
+   output, has used its work budget, or is done.
+4. **Drive it.** A small runner translates those four results into fs2 `Pull`s or ZIO
+   channel steps: pull the next chunk, emit a chunk, give way to other fibers (every ~100 µs),
+   or finish.
+5. **Stay JIT-friendly.** HotSpot doesn't compile methods over 8000 bytes of bytecode, so very
+   large pipelines are split into several methods.
+
+`fusedPar` adds one step: it looks at which operators carry state and cuts the run there.
+Stateless parts become copies of the segment working on different chunks at once, with the
+outputs put back in order.
 
 ## Verification
 

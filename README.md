@@ -67,8 +67,8 @@ Scala 3.9, JDK 21+. CI runs `sbt test` on every push (`.github/workflows/ci.yml`
 | Frontend | `internal/Frontend.scala` | Quoted patterns → `Pipe` IR. Lambdas are substituted (beta-reduced) and ports are lambda parameters. |
 | Logical IR | `internal/Pipe.scala` | Ops plus static metadata: stateless / cardinality / associativity (for the parallel planner). |
 | Kiselyov IR | `internal/Stream.scala` | `Producer = For(upb, index) \| Unfold(term, card, step)` with CPS `init`; `Stream = Linear \| Nested`. |
-| Codegen | `internal/Gen.scala` | `map / filter / flatMap / take / zipWith / windowFold`, let-insertion, `take` pushed into every loop, two backends (below), method splitting. |
-| Runtime | `runtime/Segment.scala`, `Slots.scala`, `Runner.scala` | Segment base class (ports, output buffer, status codes, poisoning), slot fields, sans-I/O runner, key partitioner, reorder buffer, in-flight accounting. |
+| Codegen | `internal/Gen.scala`, `Codegen.scala` | The staged combinators for every operator, let-insertion, `take` pushed into every loop, two backends (below), method splitting. |
+| Runtime | `runtime/Segment.scala`, `Slots.scala`, `Runner.scala`, `Chunks.scala` | Segment base class (ports, output buffer, status codes, poisoning), slot fields, sans-I/O runner, key partitioner, reorder buffer, in-flight accounting, chunk-at-a-time operations and the instance pool shared by the parallel executors. |
 
 Two backends share the IR:
 
@@ -111,8 +111,8 @@ Each maximal run of pure operators becomes one compiled segment. Everything else
 time, concurrency, operators it doesn't know) is kept exactly as written, between the runs.
 `StromFs2.fusedPlan(…)` / `StromZio.fusedPlan(…)` return what was fused and which operators were
 kept, as a compile-time string. Calls through cats syntax (`mapFilter`), extension methods and
-default arguments (`takeWhile(p)`) are recognised. `examples/` is a standalone project that uses the
-published artifacts on realistic fs2 / ZIO pipelines.
+default arguments (`takeWhile(p)`) are recognised. `examples/` is a standalone project that uses
+the published artifacts on realistic fs2 / ZIO pipelines.
 
 | | fs2 | ZIO |
 |---|---|---|
@@ -123,17 +123,6 @@ published artifacts on realistic fs2 / ZIO pipelines.
 A run must be worth a segment boundary: two or more operators, or a `flatMap`, `zipWith` or `fold`.
 The library-independent part lives in `strom.internal.ChainFuser`; each adapter only says
 which calls are pure operators and how to run a segment.
-
-## Relation to strymonas
-
-Ström follows strymonas [1, 2]. From the later normalization-by-evaluation version [2] it adopts:
-* zipping by driving with the complex side and linearising only the simple one;
-* elements as staging-time values, so tuples never exist at runtime unless they escape;
-* `map_accum_filter` as the general stateful operator.
-
-It adds resumable, chunk-driven segments, a sans-I/O runner with fs2 / ZIO / loom adapters, a
-parallel tier, and fusion of plain fs2 / ZIO code. Correctness rests on property tests against a
-reference interpreter, not on mechanised proofs (strymonas proves its laws in Agda).
 
 ## Parallel tier
 
@@ -161,8 +150,8 @@ Plans are pure data. The executors live in the adapters:
 * `StromZio.parallel(plan, parallelism, compute = Some(executor))`: `mapZIOPar` (ordered) over a
   pool of instances, `onExecutor` for CPU work, bounded queues per partition for keyed tiers.
 
-The semantics are checked by `ParallelPlanSuite` (a sequential executor that still
-round-robins over several instances), `LoomParallelSuite`, `Fs2ParallelSuite` and `ZioParallelSuite` (random
+The semantics are checked by `ParallelPlanSuite` (a sequential executor that still round-robins
+over several instances), `LoomParallelSuite`, `Fs2ParallelSuite` and `ZioParallelSuite` (random
 parallelism, queue sizes, budgets and thread kinds), all against the reference interpreter.
 
 ## Verification
@@ -187,6 +176,11 @@ parallelism, queue sizes, budgets and thread kinds), all against the reference i
 
 `sbt test` runs everything.
 
+## Numbers
+
+Measured with JMH on an Apple M1 (4 performance + 4 efficiency cores), JDK 23.
+**Lower is better in every table.** The rows come from a few separate runs.
+
 Benchmarks (they load every core, so run them on an otherwise idle machine):
 
 * `sbt "bench/Jmh/run -prof gc strom.bench.CheapStages strom.bench.Representative"`: ns and bytes per element.
@@ -194,11 +188,6 @@ Benchmarks (they load every core, so run them on an otherwise idle machine):
 * `sbt "bench/runMain strom.bench.Latency"`: lateness of a 1 ms ticker fiber while every core
   runs fused pipelines (with cede, without yields, direct loop, dedicated pool).
 * `sbt "bench/runMain strom.bench.check"`: all variants compute the same result.
-
-## Numbers
-
-Measured with JMH on an Apple M1 (4 performance + 4 efficiency cores), JDK 23.
-**Lower is better in every table.** The rows come from a few separate runs.
 
 ### Throughput: how fast and how much garbage
 
@@ -285,6 +274,17 @@ request or I/O callback would see.
   a tuple that escapes (emitted, folded, stored across a pull or `flatMap`) is still allocated.
 * `collect` is staged as a `match` only for partial-function literals; others go through
   `isDefinedAt` / `apply`.
+
+## Relation to strymonas
+
+Ström follows strymonas [1, 2]. From the later normalization-by-evaluation version [2] it adopts:
+* zipping by driving with the complex side and linearising only the simple one;
+* elements as staging-time values, so tuples never exist at runtime unless they escape;
+* `map_accum_filter` as the general stateful operator.
+
+It adds resumable, chunk-driven segments, a sans-I/O runner with fs2 / ZIO / loom adapters, a
+parallel tier, and fusion of plain fs2 / ZIO code. Correctness rests on property tests against a
+reference interpreter, not on mechanised proofs (strymonas proves its laws in Agda).
 
 ## References
 

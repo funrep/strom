@@ -15,9 +15,17 @@ private[zio] object FusedMacro:
     f.fuse(stream)
     Expr(f.summary)
 
+  def fusedPar[S: Type](parallelism: Expr[Int], stream: Expr[S])(using Quotes): Expr[S] =
+    ZioFuser(Some(parallelism)).fuse(stream).asExprOf[S]
+
+  def parPlan(stream: Expr[Any])(using Quotes): Expr[String] =
+    val f = ZioFuser(Some('{ 1 }))
+    f.fuse(stream)
+    Expr(f.summary)
+
 /** ZStream operators: `map`, `filter`, `take`, `flatMap` (onto `ZStream.range`), `zipWith`, `collect`,
  *  `zipWithIndex`, `scan`, `drop`, `takeWhile`, `dropWhile`. */
-private[zio] final class ZioFuser(using Quotes) extends ChainFuser:
+private[zio] final class ZioFuser(par: Option[Expr[Int]] = None)(using Quotes) extends ChainFuser:
   import q.reflect.*
 
   protected val streamClass = Symbol.requiredClass("zio.stream.ZStream")
@@ -45,6 +53,18 @@ private[zio] final class ZioFuser(using Quotes) extends ChainFuser:
     case Some(Call(_, qual, "range", _, (a :: b :: _) :: _)) if qual.symbol == StreamModule =>
       Some((a.asExprOf[Int], b.asExprOf[Int]))
     case _ => None
+
+  override protected def parallelism: Option[Term] = par.map(_.asTerm)
+
+  /** `StromZio.fusedParRun[R, E, B](plan, input, tag, n, maxOut, budget)(trace)` */
+  override protected def emitParallel(r: Run, plan: Term, input: Term, tag: Term, n: Term): Option[Term] =
+    val last = r.calls.last.term
+    val List(rT, eT, bT) = typeArgs(last.tpe): @unchecked
+    val trace = Expr.summon[Trace].getOrElse(report.errorAndAbort("strom: no zio.Trace"))
+    val call = Select.unique(Ref(Symbol.requiredModule("strom.zio.StromZio")), "fusedParRun").appliedToTypes(List(rT, eT, bT))
+      .appliedToArgs(List(plan, input, tag, n, Literal(IntConstant(Segment.DefaultMaxOut)), Literal(IntConstant(Segment.DefaultBudget))))
+      .appliedToArgs(List(trace.asTerm))
+    Some(Typed(call, Inferred(last.tpe)))
 
   /** `StromZio.fusedRun[R, E, B](factory, inputs, tags, maxOut, budget)`, ascribed the type of
    *  the run's last call. */

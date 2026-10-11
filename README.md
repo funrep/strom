@@ -18,8 +18,9 @@ val total: Stream[IO, Long] = StromFs2.fused {
 StromFs2.fusedPlan(...)  // compile-time report: "fused: map → filter … / kept: evalMap"
 ```
 
-Same for ZIO with `StromZio.fused { … }`. No rewrite into a new DSL; results are identical to the
-unfused code. Typical gains: ~8× on simple map/filter chains, ~100× on nested/zip pipelines, with
+Same for ZIO with `StromZio.fused { … }`. Swap in `fusedPar(n) { … }` to also spread the fused
+work over `n` cores ([Running on several cores](#running-on-several-cores)). No rewrite into a new
+DSL; results are identical to the unfused code. Typical gains: ~8× on simple map/filter chains, ~100× on nested/zip pipelines, with
 ~1 byte of garbage per element instead of 100+ (see [Numbers](#numbers)).
 
 ## Install
@@ -65,6 +66,64 @@ A run must be worth a segment boundary: two or more operators, or a `flatMap`, `
 The library-independent part lives in `strom.internal.ChainFuser`; each adapter only says
 which calls are pure operators and how to run a segment.
 
+## Running on several cores
+
+```scala
+StromFs2.fusedPar(parallelism = 8) {
+  in.map(parse).filter(valid).map(score)   // chunks processed by 8 workers, order kept
+    .take(1000L)                           // one instance: stateful
+    .fold(0L)(_ + _)                       // associative: partial folds combined in order
+}
+StromZio.fusedPar(8) { … }
+StromFs2.fusedParPlan(…)  // "fused: map → filter → map → take → fold (1 inputs),
+                          //  parallel: replicated[map → filter → map] | single[take → fold]"
+```
+
+`fusedPar` is `fused`, plus a compile-time plan for each fused run. The output is exactly that
+of the sequential stream, in the same order.
+
+* **Stateless operators** (`map`, `filter`, `collect`, `mapFilter`, `flatMap`): chunks go to
+  N workers, and results are put back in input order.
+* **Stateful operators** (`take`, `drop`, `scan`, `zip`, `zipWithIndex`, `mapAccum…`,
+  `takeWhile`, …): one instance. The run is cut there, so stateless work before and after it
+  still runs in parallel (light trailing work stays fused with the stateful operator).
+* **`fold`** with a recognised associative operator and its identity as the start value
+  (`_ + _` from 0, `_ * _` from 1, `&`, `|`, `^`, `math.max` / `math.min`, on Ints or Longs):
+  each chunk is folded separately and the partial results are combined in order. Any other fold
+  runs on one instance.
+* Effects and other unfused operators stay where they are, as with `fused`. Runs with no
+  parallel part, or with several inputs (a `zip` of two effectful streams), run sequentially.
+  fs2 needs `Concurrent[F]`; without it the run stays sequential.
+
+**Safety.** The lambdas of fused operators run on several threads at once, so they must be pure.
+A lambda that reads or writes a captured `var` is rejected at compile time. Other shared mutable
+state (a mutable map, a non-thread-safe object) cannot be detected, so it is your responsibility.
+Side effects inside lambdas (logging, metrics) can run out of order, or on elements past a
+`take` or after an error, because upstream chunks are processed ahead. Parallelism pays off only
+when each element does real work; for a cheap `map`, the hand-offs cost more than they save.
+
+**Execution.** fs2 uses `parEvalMap` (ordered) and ZIO uses `mapZIOPar` (ordered), each over a
+pool of reusable compiled instances, one task per chunk (not per element). For plain threads,
+`strom-loom` runs the same plans over bounded queues: build one with
+`LoomParallel.plan((a: Strom[Int]) => …)` and start it with
+`LoomParallel.start(plan, in, out, Config(parallelism, queueCapacity, …, compute))`. Coordination
+runs on virtual threads. Workers run on `compute`: virtual threads by default, or e.g.
+`Thread.ofPlatform().factory()` for a dedicated pool. A semaphore-bounded window feeds an
+`InFlight` / `ReorderBuffer` pair, so memory stays bounded. If a downstream tier finishes early
+(`take`), the upstream tiers are stopped.
+
+| Run shape | Plan |
+|---|---|
+| only stateless ops | `Replicated`: N instances, one chunk each, outputs reordered |
+| stateless ops + associative fold | `PartialFold`: per-chunk folds combined in input order |
+| stateless prefix, then a stateful op | `Replicated` prefix, then `Single`: cut at the stateful op |
+| …then more stateless ops | light ones (< 3 ops, no `flatMap`) stay in the `Single` tier; heavy ones get another `Replicated` (or `PartialFold`) tier; adjacent `Single` tiers merge |
+
+The semantics are checked by `Fs2ParallelSuite` and `ZioParallelSuite` (`fusedPar` against the
+plain, unfused stream, for random inputs, chunkings and parallelism), `ParallelPlanSuite` (a
+sequential executor that still round-robins over several instances) and `LoomParallelSuite`
+(random parallelism, queue sizes, budgets and thread kinds).
+
 ## Lower-level API: the `Strom` DSL
 
 `fused` compiles through a small DSL, also usable directly, e.g. for array processing or to drive
@@ -85,9 +144,9 @@ val seg = Strom.segment((a: Strom[Int], b: Strom[Int]) =>
   a.flatMap(x => Strom.range(0, x)).zipWith(b.filter(_ % 2 == 0))(_ * _).take(n).sum)
 val out: Stream[IO, Int] = StromFs2.fold2[IO, Int, Int, Int](seg)(as, bs)
 
-Strom.parallel((a: Strom[Int]) => …)   // a parallel plan (see below)
-Strom.showCode(…)                      // the generated code, as a compile-time string
-Strom.explain(…)                       // stage metadata and the Kiselyov IR shape
+LoomParallel.plan((a: Strom[Int]) => …) // a parallel plan, run on threads by strom-loom
+Strom.showCode(…)                         // the generated code, as a compile-time string
+Strom.explain(…)                          // stage metadata and the Kiselyov IR shape
 ```
 
 ## Guarantees
@@ -117,7 +176,7 @@ Strom.explain(…)                       // stage metadata and the Kiselyov IR s
 | Logical IR | `internal/Pipe.scala` | Ops plus static metadata: stateless / cardinality / associativity (for the parallel planner). |
 | Kiselyov IR | `internal/Stream.scala` | `Producer = For(upb, index) \| Unfold(term, card, step)` with CPS `init`; `Stream = Linear \| Nested`. |
 | Codegen | `internal/Gen.scala`, `Codegen.scala` | The staged combinators for every operator, let-insertion, `take` pushed into every loop, two backends (below), method splitting. |
-| Runtime | `runtime/Segment.scala`, `Slots.scala`, `Runner.scala`, `Chunks.scala` | Segment base class (ports, output buffer, status codes, poisoning), slot fields, sans-I/O runner, key partitioner, reorder buffer, in-flight accounting, chunk-at-a-time operations and the instance pool shared by the parallel executors. |
+| Runtime | `runtime/Segment.scala`, `Slots.scala`, `Runner.scala`, `Chunks.scala` | Segment base class (ports, output buffer, status codes, poisoning), slot fields, sans-I/O runner, reorder buffer, in-flight accounting, chunk-at-a-time operations and the instance pool shared by the parallel executors. |
 
 Two backends share the IR:
 
@@ -145,36 +204,6 @@ outlined into local `def`s. The compiler lifts these into separate methods, and 
 inside them are retargeted. Direct pipelines that are too large switch to field storage on a
 one-shot frame, so that outlined code does not capture (and box) locals.
 
-## Parallel tier
-
-`Strom.parallel` / `Strom.parallelKeyed` compile a one-input pipeline into a
-`ParallelPlan`, using the static metadata (stateless / associative / cardinality):
-
-| Pipeline shape | Plan |
-|---|---|
-| only stateless ops (`map`, `filter`, `flatMap`) | `Replicated`: N instances, one chunk each, outputs reordered (`ReorderBuffer`) |
-| stateless ops + `sum` / `count` / `foldAssociative` (element = result type) | `PartialFold`: per-chunk folds combined in input order |
-| stateless prefix, then a stateful op (`take`, `zipWith`, `windowFold`, `scan`, other folds…) | `Replicated` prefix, then `Single`: the pipeline is cut at the stateful op |
-| …then more stateless ops | light ones (< 3 ops, no `flatMap`) stay fused in the `Single` tier; heavy ones get another `Replicated` (or `PartialFold`) tier; adjacent `Single` tiers merge |
-| `parallelKeyed(key)(…)` | `Keyed`: one instance per partition; a staged partitioner (key function inlined, specialised to the element type) routes each chunk |
-
-Plans are pure data. The executors live in the adapters:
-
-* `LoomParallel.start(plan, in, out, Config(parallelism, queueCapacity, …, compute))`: tiers
-  connected by bounded queues. Coordination runs on virtual threads. Workers run on `compute`
-  (virtual by default; e.g. `Thread.ofPlatform().factory()` for a dedicated pool). A
-  semaphore-bounded window feeds an `InFlight` / `ReorderBuffer` pair, so memory stays bounded.
-  If a downstream tier finishes early, the upstream tiers are stopped.
-* `StromFs2.parallel(plan, parallelism, compute = Some(ec))`: `parEvalMap` (ordered) over a
-  pool of reusable instances. With `compute`, CPU work runs via `evalOn`. Keyed tiers use one
-  bounded `Channel` per partition and `parJoin`.
-* `StromZio.parallel(plan, parallelism, compute = Some(executor))`: `mapZIOPar` (ordered) over a
-  pool of instances, `onExecutor` for CPU work, bounded queues per partition for keyed tiers.
-
-The semantics are checked by `ParallelPlanSuite` (a sequential executor that still round-robins
-over several instances), `LoomParallelSuite`, `Fs2ParallelSuite` and `ZioParallelSuite` (random
-parallelism, queue sizes, budgets and thread kinds), all against the reference interpreter.
-
 ## Verification
 
 * `SegmentSuite`, `DirectSuite`, `RunnerSuite`, `StromFs2Suite`: fixed pipelines (the
@@ -192,8 +221,9 @@ parallelism, queue sizes, budgets and thread kinds), all against the reference i
 * `AllocationSuite`, `TupleSuite`: zero per-element allocation (measured with the JVM's
   allocation counter), and no `Tuple2` / `Some` in the generated code for destructured tuples and
   `mapAccumFilter` steps.
-* `ParallelPlanSuite`, `LoomParallelSuite`, `Fs2ParallelSuite`, `ZioParallelSuite`, `FusedSuite`,
-  `ZioFusedSuite`: parallel plans and fusion of plain fs2 / ZIO code against the reference.
+* `FusedSuite`, `ZioFusedSuite`, `Fs2ParallelSuite`, `ZioParallelSuite`: `fused` / `fusedPar`
+  against the same plain fs2 / ZIO code, unfused.
+* `ParallelPlanSuite`, `LoomParallelSuite`: parallel plans against the reference interpreter.
 
 `sbt test` runs everything.
 
@@ -249,14 +279,15 @@ workers. Lower is better; halving it when N doubles would be perfect scaling.
 | workers | 1 | 2 | 4 | 8 |
 |---|---|---|---|---|
 | loom executor | 8.0 | 4.1 | 2.2 | 1.9 |
-| fs2 executor | 8.3 | 4.7 | 2.9 | 2.8 |
+| fs2 (`fusedPar`) | 8.3 | 4.7 | 2.9 | 2.8 |
 | single thread, no executor | 7.4 | | | |
 
 * **Good:** near-perfect scaling up to 4 workers (8.0 → 2.2 ns, ~3.6×). The executor's own
   overhead is small: 1 worker ≈ the single-thread baseline.
 * **Limited:** 4 → 8 adds little. The M1's other 4 cores are slower efficiency cores, and the
   queue hand-offs start to matter (not profiled further). fs2 flattens earlier (more coordination per chunk).
-* Measured before the 100 µs time-slice change; ZIO scaling (`zioPar`) has not been run yet.
+* Measured before the 100 µs time-slice change, with the executors that `fusedPar` now uses.
+  ZIO scaling (`zioPar`) and partial-fold / multi-cut plans have not been benchmarked yet.
 
 ### Responsiveness: does fused work starve other tasks?
 
@@ -281,8 +312,9 @@ request or I/O callback would see.
 
 ## Limits (v1)
 
-* Parallel plans support one-input pipelines; the "heavy" rule for re-replicating after a
-  stateful operator is a fixed heuristic (no cost model).
+* `fusedPar` parallelises one-input runs; the "heavy" rule for re-replicating after a stateful
+  operator is a fixed heuristic (no cost model). Associative folds are recognised only for the
+  operators listed in [Running on several cores](#running-on-several-cores).
 * Not fused (by design): fan-out (an input port is consumed once), effects inside segments,
   dynamic pipeline shapes. Those stay at the runtime level, between segments.
 * `flatMap` needs a lambda literal whose body is a `Strom` expression. Other functions may be

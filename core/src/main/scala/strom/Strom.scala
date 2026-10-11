@@ -1,6 +1,6 @@
 package strom
 
-import strom.runtime.{DirectFrame, ParallelPlan, SegmentFactory}
+import strom.runtime.{DirectFrame, SegmentFactory}
 
 /** A fusible stream description: the lower-level API under `StromFs2.fused` / `StromZio.fused`.
  *
@@ -91,16 +91,6 @@ object Strom:
     ${ internal.Macros.segmentOf[R]('f) }
   inline def segment[A, B, C, D, R](inline f: (Strom[A], Strom[B], Strom[C], Strom[D]) => R): SegmentFactory[ResultOf[R]] =
     ${ internal.Macros.segmentOf[R]('f) }
-
-  /** A parallel execution plan for a one-input pipeline lambda (see
-   *  [[strom.runtime.ParallelPlan]]): stateless parts are replicated, stateful ones run as single
-   *  instances, an associative fold runs as per-chunk partial folds. */
-  inline def parallel[A, R](inline f: Strom[A] => R): ParallelPlan[ResultOf[R]] = ${ internal.Macros.parallelOf[R]('f) }
-
-  /** A stateful pipeline run as one instance per partition; `key` routes elements so that all
-   *  elements with the same key reach the same instance, in order. */
-  inline def parallelKeyed[A, B](inline key: A => Int)(inline f: Strom[A] => Strom[B]): ParallelPlan[B] =
-    ${ internal.Macros.parallelKeyed[B]('f, 'key) }
 
   /** `Strom[B]` → `B` (emitted elements), `Fold[R]` → `R` (the fold's result). */
   type ResultOf[R] = R match

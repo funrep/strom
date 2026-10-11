@@ -4,7 +4,7 @@ import java.util.concurrent.{ArrayBlockingQueue, TimeUnit}
 import scala.util.Random
 import strom.{Fold, Reference, Strom}
 import strom.loom.StromLoom.*
-import strom.runtime.{KeyPartitioner, ParallelPlan}
+import strom.runtime.ParallelPlan
 
 class LoomParallelSuite extends munit.FunSuite:
   def feed(xs: Array[Int], r: Random, q: ArrayBlockingQueue[Msg]): Unit =
@@ -45,40 +45,39 @@ class LoomParallelSuite extends munit.FunSuite:
   inline def multi = (a: Strom[Int]) =>
     a.flatMap(x => Strom.range(0, x % 4)).take(700).map(_ * 3).filter(_ % 2 == 0).flatMap(x => Strom.range(0, x % 3)).map(_ + 1)
   inline def multiFold = (a: Strom[Int]) => a.map(_ + 1).take(900).flatMap(x => Strom.range(0, x % 5)).map(_ * 2).sum
-  inline def windowed = (a: Strom[Int]) => a.windowFold(2)(0)(_ * 10 + _)
 
   def randomInput(r: Random) = Array.fill(r.nextInt(2000))(r.nextInt(50) - 5)
 
   test("replicated tier keeps input order") {
-    val plan = Strom.parallel(stateless); val r = Random(1)
+    val plan = LoomParallel.plan(stateless); val r = Random(1)
     for _ <- 0 until 60 do
       val xs = randomInput(r)
       assertEquals(runPlan(plan, xs, configs(r), r)._1, Reference.toList(stateless(Strom.fromSeq(xs.toSeq))))
   }
 
   test("replicated prefix + single tier") {
-    val plan = Strom.parallel(cut); val r = Random(2)
+    val plan = LoomParallel.plan(cut); val r = Random(2)
     for _ <- 0 until 60 do
       val xs = randomInput(r)
       assertEquals(runPlan(plan, xs, configs(r), r)._1, Reference.toList(cut(Strom.fromSeq(xs.toSeq))))
   }
 
   test("partial folds combine in order") {
-    val plan = Strom.parallel(partial); val r = Random(3)
+    val plan = LoomParallel.plan(partial); val r = Random(3)
     for _ <- 0 until 60 do
       val xs = randomInput(r)
       assertEquals(runPlan(plan, xs, configs(r), r)._2, Some(Reference.run(partial(Strom.fromSeq(xs.toSeq)))))
   }
 
   test("non-associative fold runs as a single tier after the replicated prefix") {
-    val plan = Strom.parallel(nonAssoc); val r = Random(4)
+    val plan = LoomParallel.plan(nonAssoc); val r = Random(4)
     for _ <- 0 until 60 do
       val xs = randomInput(r)
       assertEquals(runPlan(plan, xs, configs(r), r)._2, Some(Reference.run(nonAssoc(Strom.fromSeq(xs.toSeq)))))
   }
 
   test("multi-cut plans") {
-    val (pm, pf) = (Strom.parallel(multi), Strom.parallel(multiFold)); val r = Random(8)
+    val (pm, pf) = (LoomParallel.plan(multi), LoomParallel.plan(multiFold)); val r = Random(8)
     assertEquals(pm.tiers.map(_.productPrefix), Vector("Replicated", "Single", "Replicated"))
     for _ <- 0 until 40 do
       val xs = randomInput(r); val s = Strom.fromSeq(xs.toSeq)
@@ -86,22 +85,12 @@ class LoomParallelSuite extends munit.FunSuite:
       assertEquals(runPlan(pf, xs, configs(r), r)._2, Some(Reference.run(multiFold(s))))
   }
 
-  test("keyed tier: per-partition state") {
-    val plan = Strom.parallelKeyed((x: Int) => x % 11)(windowed); val r = Random(5)
-    for _ <- 0 until 60 do
-      val xs = randomInput(r)
-      val cfg = configs(r)
-      val expected = (0 until cfg.parallelism).flatMap(p =>
-        Reference.toList(windowed(Strom.fromSeq(xs.toSeq.filter(x => KeyPartitioner.partition(x % 11, cfg.parallelism) == p)))))
-      assertEquals(runPlan(plan, xs, cfg, r)._1.map(_.asInstanceOf[Int]).sorted, expected.toList.sorted)
-  }
-
   test("a worker failure is reported downstream") {
-    val plan = Strom.parallel((a: Strom[Int]) => a.map(x => 100 / x))
+    val plan = LoomParallel.plan((a: Strom[Int]) => a.map(x => 100 / x))
     intercept[ArithmeticException](runPlan(plan, Array.fill(500)(1) :+ 0, LoomParallel.Config(parallelism = 3), Random(6)))
   }
 
   test("empty input") {
-    assertEquals(runPlan(Strom.parallel(partial), Array.empty, LoomParallel.Config(parallelism = 2), Random(7))._2, Some(0))
-    assertEquals(runPlan(Strom.parallel(stateless), Array.empty, LoomParallel.Config(parallelism = 2), Random(7))._1, Nil)
+    assertEquals(runPlan(LoomParallel.plan(partial), Array.empty, LoomParallel.Config(parallelism = 2), Random(7))._2, Some(0))
+    assertEquals(runPlan(LoomParallel.plan(stateless), Array.empty, LoomParallel.Config(parallelism = 2), Random(7))._1, Nil)
   }

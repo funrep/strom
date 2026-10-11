@@ -32,7 +32,7 @@ class Scaling:
     a.map(x => x * 31 + 7).map(x => x ^ (x >>> 13)).map(x => x * 0x5bd1e995).map(x => x ^ (x >>> 15))
      .filter(_ % 3 != 0).map(x => x * 17 + (x >>> 7)).map(x => x ^ (x << 5)).map(x => (x * 13) ^ (x >>> 11))
 
-  val plan = Strom.parallel((a: Strom[Int]) => work(a))
+  val plan = LoomParallel.plan((a: Strom[Int]) => work(a))
   val single = Strom.segment((a: Strom[Int]) => work(a))
 
   @Benchmark def loom(): Long =
@@ -53,14 +53,20 @@ class Scaling:
     sum
 
   @Benchmark def fs2(): Long =
-    _root_.fs2.Stream.emits(fs2Chunks).flatMap(_root_.fs2.Stream.chunk).covary[IO]
-      .through(StromFs2.parallel[IO, Int, Int](plan, parallelism)).chunks.map(_.size.toLong).compile.foldMonoid.unsafeRunSync()
+    val in = _root_.fs2.Stream.emits(fs2Chunks).flatMap(_root_.fs2.Stream.chunk).covary[IO]
+    StromFs2.fusedPar(parallelism)(
+      in.map(x => x * 31 + 7).map(x => x ^ (x >>> 13)).map(x => x * 0x5bd1e995).map(x => x ^ (x >>> 15))
+        .filter(_ % 3 != 0).map(x => x * 17 + (x >>> 7)).map(x => x ^ (x << 5)).map(x => (x * 13) ^ (x >>> 11))
+    ).chunks.map(_.size.toLong).compile.foldMonoid.unsafeRunSync()
 
   val zioChunks = chunks.map(zio.Chunk.fromArray(_))
 
   @Benchmark def zioPar(): Long =
-    val eff = strom.zio.StromZio.parallel[Any, Nothing, Int, Int](plan, parallelism)(zio.stream.ZStream.fromChunks(zioChunks*))
-      .chunks.map(_.size.toLong).runSum
+    val in = zio.stream.ZStream.fromChunks(zioChunks*)
+    val eff = strom.zio.StromZio.fusedPar(parallelism)(
+      in.map(x => x * 31 + 7).map(x => x ^ (x >>> 13)).map(x => x * 0x5bd1e995).map(x => x ^ (x >>> 15))
+        .filter(_ % 3 != 0).map(x => x * 17 + (x >>> 7)).map(x => x ^ (x << 5)).map(x => (x * 13) ^ (x >>> 11))
+    ).chunks.map(_.size.toLong).runSum
     zio.Unsafe.unsafe(implicit u => zio.Runtime.default.unsafe.run(eff).getOrThrow())
 
   /** Sequential reference point: the same segment on one thread (independent of `parallelism`). */

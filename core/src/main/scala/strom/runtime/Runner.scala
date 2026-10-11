@@ -74,20 +74,6 @@ final class TimeSlice(nanos: Long):
     val now = System.nanoTime()
     if now - last >= nanos then { last = now; true } else false
 
-/** Stable key → partition assignment (for key-partitioned stateful stages). */
-object KeyPartitioner:
-  /** Partition in `[0, partitions)` for a key hash; uses a murmur3 finaliser so that
-   *  consecutive or poorly distributed hash codes still spread evenly. */
-  def partition(hash: Int, partitions: Int): Int =
-    require(partitions > 0)
-    var h = hash
-    h ^= h >>> 16; h *= 0x85ebca6b
-    h ^= h >>> 13; h *= 0xc2b2ae35
-    h ^= h >>> 16
-    ((h & 0x7fffffffL) % partitions).toInt
-
-  def partitionOf(key: Any, partitions: Int): Int = partition(key.##, partitions)
-
 /** Reorders results that complete out of order (e.g. chunks processed by N stateless workers)
  *  back into sequence order. Not thread-safe: own it from one thread / fiber. Bounded: at most
  *  `capacity` sequence numbers may be outstanding past the next one to deliver. */

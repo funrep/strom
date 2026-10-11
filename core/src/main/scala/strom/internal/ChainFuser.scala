@@ -44,6 +44,13 @@ abstract class ChainFuser(using val q: Quotes):
   /** Code running the compiled segment of `run`, typed like `run.calls.last.term`. */
   protected def emit(run: Run, sink: Pipe.Sink): Term
 
+  /** In `fusedPar` mode: the requested parallelism. */
+  protected def parallelism: Option[Term] = None
+  /** Code running `plan` (a `ParallelPlan` of `run`'s single input `input`, with element class
+   *  tag `tag`) on `n` workers, typed like `run.calls.last.term`; None if the stream's effect
+   *  cannot run concurrently. */
+  protected def emitParallel(run: Run, plan: Term, input: Term, tag: Term, n: Term): Option[Term] = None
+
   // ------------------------------------------------------------------ machinery
 
   /** Type arguments of a stream type. */
@@ -185,11 +192,11 @@ abstract class ChainFuser(using val q: Quotes):
     var run: Option[Run] = None
 
     def flush(): Unit = run.foreach { r =>
+      val sink = r.fold.getOrElse(r.pipe match { case p: Pipe[a] => Pipe.EmitSink[a](p) })
       current =
-        if r.worth then
-          val sink = r.fold.getOrElse(r.pipe match { case p: Pipe[a] => Pipe.EmitSink[a](p) })
+        if r.worth || parallelisable(r, sink) then
           log += s"fused: ${r.names.mkString(" → ")} (${r.inputs.size} inputs)"
-          emit(r, sink)
+          parallel(r, sink).getOrElse(emit(r, sink))
         else r.calls.foldLeft(r.original)((acc, c) => rebuild(c.term, acc))
       run = None
     }
@@ -218,6 +225,71 @@ abstract class ChainFuser(using val q: Quotes):
           current = rebuild(c.term, current)
     flush()
     current
+
+  // ------------------------------------------------------------------ fusedPar
+
+  /** The parallel version of a run: only in `fusedPar` mode, for a run with one input whose
+   *  plan has a parallel tier. Its lambdas must not capture mutable variables. */
+  private def parallelisable(r: Run, sink: Pipe.Sink): Boolean =
+    parallelism.isDefined && r.inputs.size == 1 && Parallel.describe(sink, r.inputs.head._2.asType).isDefined
+
+  private def parallel(r: Run, sink: Pipe.Sink): Option[Term] =
+    for
+      n <- parallelism
+      if r.inputs.size == 1
+      port = r.inputs.head._2.asType
+      desc <- Parallel.describe(sink, port)
+      _ = r.calls.foreach(noCapturedVars)
+      plan = ((Parallel.outType(sink): @unchecked) match { case '[o] => Parallel.plan[o](sink, List(port)).asTerm })
+      tag = port match { case '[a] => Expr.summon[ClassTag[a]].getOrElse(report.errorAndAbort(s"strom: no ClassTag for ${r.inputs.head._2.show}")) }
+      t <- emitParallel(r, plan, r.inputs.head._1, tag.asTerm, n)
+    yield
+      log(log.size - 1) += s", parallel: $desc"
+      t
+
+  /** Rejects a `var` read or written by an operator's arguments, unless defined inside them: run
+   *  on several threads at once, it would be a data race. */
+  private def noCapturedVars(c: Call): Unit =
+    val local = collection.mutable.Set.empty[Symbol]
+    val check = new TreeTraverser:
+      override def traverseTree(t: Tree)(owner: Symbol): Unit =
+        t match
+          case d: Definition => local += d.symbol
+          case r: Ref if r.symbol.flags.is(Flags.Mutable) && !local(r.symbol) =>
+            report.errorAndAbort(s"strom: fusedPar runs `${c.name.stripSuffix("*")}` on several threads, but its argument uses " +
+              s"the var `${r.symbol.name}` (a data race). Use `fused`, or avoid shared mutable state.", r.pos)
+          case _ =>
+        super.traverseTree(t)(owner)
+    c.argss.flatten.foreach(a => check.traverseTree(a)(Symbol.spliceOwner))
+
+  /** `(x, y) => x op y` with a literal identity `z` for an associative (and commutative)
+   *  operator on Ints or Longs: `+`, `*`, `&`, `|`, `^`, `max`, `min` (`math.` or `Math.`). */
+  private def associative(z: Term, f: Term): Boolean =
+    val zero: Option[Long] = strip(z).tpe match
+      case ConstantType(IntConstant(v))  => Some(v.toLong)
+      case ConstantType(LongConstant(v)) => Some(v)
+      case _ => None
+    val tpeOk = z.tpe.widen =:= TypeRepr.of[Int] || z.tpe.widen =:= TypeRepr.of[Long]
+    def isParams(a: Term, b: Term, ps: List[Symbol]) =
+      (strip(a), strip(b)) match
+        case (x: Ident, y: Ident) => Set(x.symbol, y.symbol) == ps.toSet && ps.size == 2
+        case _ => false
+    val op: Option[String] = strip(f) match
+      case Lambda(List(p1, p2), body) =>
+        val ps = List(p1.symbol, p2.symbol)
+        strip(body) match
+          case Apply(Select(a, name), List(b)) if isParams(a, b, ps) => Some(name)
+          case Apply(fn, List(a, b)) if isParams(a, b, ps) && Set("max", "min")(fn.symbol.name) &&
+              Set("scala.math.package$", "java.lang.Math")(fn.symbol.owner.fullName) => Some(fn.symbol.name)
+          case _ => None
+      case _ => None
+    tpeOk && op.exists {
+      case "+" | "|" | "^" => zero.contains(0L)
+      case "*"             => zero.contains(1L)
+      case "&"             => zero.contains(-1L)
+      case "max" | "min"   => zero.isDefined
+      case _               => false
+    }
 
   private def add(r: Run, c: Call, o: PureOp): Unit =
     r.calls :+= c
@@ -268,7 +340,12 @@ abstract class ChainFuser(using val q: Quotes):
           case PureOp.TakeWhile(p) => r.pipe = Pipe.TakeWhileP[a](up, front.fn1[a, Boolean](p.asExprOf[a => Boolean]))
           case PureOp.DropWhile(p) => r.pipe = Pipe.DropWhileP[a](up, front.fn1[a, Boolean](p.asExprOf[a => Boolean]))
           case PureOp.Fold(z, f) =>
-            r.fold = Some(Pipe.FoldSink[a, b](up, z.asExprOf[b], front.fn2[b, a, b](f.asExprOf[(b, a) => b]), associative = false))
+            // A recognised associative operator over the element type allows parallel partial folds.
+            val combine =
+              if TypeRepr.of[a] =:= TypeRepr.of[b] && associative(z, f) then Some(front.fn2[b, b, b](f.asExprOf[(b, b) => b]))
+              else None
+            r.fold = Some(Pipe.FoldSink[a, b](up, z.asExprOf[b], front.fn2[b, a, b](f.asExprOf[(b, a) => b]),
+              associative = combine.isDefined, combine))
 
   /** A zip operand: inlined if pure, else fused on its own and added as an input. */
   private def zipOperand[t: Type](r: Run, that: Term): Pipe[t] =

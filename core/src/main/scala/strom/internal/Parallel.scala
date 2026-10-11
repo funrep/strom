@@ -1,7 +1,7 @@
 package strom.internal
 
 import scala.quoted.*
-import strom.runtime.{KeyPartitioner, ParallelPlan, Partitioner, SegmentFactory, Tier}
+import strom.runtime.{ParallelPlan, SegmentFactory, Tier}
 
 /** Plans the parallel execution of a one-input pipeline from its static metadata. Along the
  *  operators from the input port: stateless runs are replicated over N workers; each stateful
@@ -23,7 +23,7 @@ object Parallel:
         ZipWithP[a, b, c](replace(m.l, target, repl).asInstanceOf[Pipe[a]], replace(m.r, target, repl).asInstanceOf[Pipe[b]], m.f)
       case _ => p
 
-  private def outType(sink: Sink): Type[?] = sink match
+  def outType(sink: Sink): Type[?] = sink match
     case fs: FoldSink[?, ?] => fs.tpe
     case es: EmitSink[?]    => es.tpe
 
@@ -31,19 +31,17 @@ object Parallel:
     outType(sink) match
       case '[o] => Codegen.segment[o](sink, List(port))
 
-  def plan[O: Type](sink: Sink, portTypes: List[Type[?]], key: Option[Expr[Any]], front: Frontend)(
-      using Quotes): Expr[ParallelPlan[O]] =
+  def plan[O: Type](sink: Sink, portTypes: List[Type[?]])(using Quotes): Expr[ParallelPlan[O]] =
     if portTypes.size != 1 then
       quotes.reflect.report.errorAndAbort("strom: parallel plans support one-input pipelines")
-    val port = portTypes.head
-    val tiers: List[Expr[Tier]] = key match
-      case Some(k) =>
-        port match
-          case '[a] =>
-            val keyFn = front.fn1[a, Int](k.asExprOf[a => Int])
-            List('{ Tier.Keyed(${ factory(sink, port) }, ${ partitioner[a](keyFn) }) })
-      case None => cutPlan(sink, port)
+    val tiers = cutPlan(sink, portTypes.head).map(_._2)
     '{ ParallelPlan[O](Vector(${ Varargs(tiers) }*), 1) }
+
+  /** The tiers of the plan for a one-input `sink`, e.g. `replicated[map → filter] | single[take]`;
+   *  None when nothing would run in parallel (every tier single). */
+  def describe(sink: Sink, port: Type[?])(using Quotes): Option[String] =
+    val tiers = cutPlan(sink, port).map(_._1)
+    if tiers.forall(_.startsWith("single")) then None else Some(tiers.mkString(" | "))
 
   // ------------------------------------------------------------------ multi-cut planning
 
@@ -69,7 +67,7 @@ object Parallel:
    *  or several operators. Lighter runs stay fused with the preceding stateful operator. */
   private def heavy(run: Seq[Pipe[?]]): Boolean = run.exists(_.isInstanceOf[FlatMapP[?, ?]]) || run.size >= 3
 
-  private def cutPlan(sink: Sink, port: Type[?])(using Quotes): List[Expr[Tier]] =
+  private def cutPlan(sink: Sink, port: Type[?])(using Quotes): List[(String, Expr[Tier])] =
     val nodes = pathNodes(upstream(sink)).toVector
     val n = nodes.size
     val groups = collection.mutable.ArrayBuffer.empty[Group]
@@ -98,69 +96,39 @@ object Parallel:
     def portOf(from: Int): Type[?] = if from == 1 then port else nodes(from - 1).tpe
     def emit(p: Pipe[?]): Sink = p match { case q: Pipe[a] => EmitSink[a](q) }
 
-    val tiers = collection.mutable.ArrayBuffer.empty[Expr[Tier]]
+    def names(from: Int, to: Int, fold: Boolean): String =
+      ((from to to).map(i => stageInfo(nodes(i)).op) ++ (if fold then List("fold") else Nil)).mkString(" → ")
+    val tiers = collection.mutable.ArrayBuffer.empty[(String, Expr[Tier])]
     sink match
       case fs: FoldSink[a, s] =>
         given Type[s] = fs.tpe
         def foldOver(p: Pipe[?]): Sink =
           FoldSink[a, s](p.asInstanceOf[Pipe[a]], fs.z, fs.op, fs.associative, fs.combine)(using fs.tpe)
         val (init, last) = (groups.dropRight(1), groups.lastOption)
-        init.foreach(g => tiers += tierOf(g, segmentPipe, portOf, emit))
+        init.foreach(g => tiers += tierOf(g, segmentPipe, portOf, emit, names))
         last match
           case Some(Group.Repl(f, t)) if fs.combine.isDefined =>
-            tiers += '{ Tier.PartialFold(${ factory(foldOver(segmentPipe(f, t)), portOf(f)) }, ${ combine[s](fs.combine.get) }) }
+            tiers += s"partialFold[${names(f, t, true)}]" ->
+              '{ Tier.PartialFold(${ factory(foldOver(segmentPipe(f, t)), portOf(f)) }, ${ combine[s](fs.combine.get) }) }
           case Some(Group.Repl(f, t)) =>
-            tiers += tierOf(Group.Repl(f, t), segmentPipe, portOf, emit)
-            tiers += '{ Tier.Single(${ factory(foldOver(segmentPipe(n, n - 1)), portOf(n)) }) }
+            tiers += tierOf(Group.Repl(f, t), segmentPipe, portOf, emit, names)
+            tiers += "single[fold]" -> '{ Tier.Single(${ factory(foldOver(segmentPipe(n, n - 1)), portOf(n)) }) }
           case Some(Group.Single(f, t)) =>
-            tiers += '{ Tier.Single(${ factory(foldOver(segmentPipe(f, t)), portOf(f)) }) }
+            tiers += s"single[${names(f, t, true)}]" -> '{ Tier.Single(${ factory(foldOver(segmentPipe(f, t)), portOf(f)) }) }
           case None =>
             if fs.combine.isDefined then
-              tiers += '{ Tier.PartialFold(${ factory(foldOver(nodes(0)), port) }, ${ combine[s](fs.combine.get) }) }
-            else tiers += '{ Tier.Single(${ factory(foldOver(nodes(0)), port) }) }
+              tiers += "partialFold[fold]" ->
+                '{ Tier.PartialFold(${ factory(foldOver(nodes(0)), port) }, ${ combine[s](fs.combine.get) }) }
+            else tiers += "single[fold]" -> '{ Tier.Single(${ factory(foldOver(nodes(0)), port) }) }
       case _: EmitSink[?] =>
-        if groups.isEmpty then tiers += '{ Tier.Single(${ factory(emit(nodes(0)), port) }) }
-        else groups.foreach(g => tiers += tierOf(g, segmentPipe, portOf, emit))
+        if groups.isEmpty then tiers += "single[]" -> '{ Tier.Single(${ factory(emit(nodes(0)), port) }) }
+        else groups.foreach(g => tiers += tierOf(g, segmentPipe, portOf, emit, names))
     tiers.toList
 
-  private def tierOf(g: Group, pipe: (Int, Int) => Pipe[?], portOf: Int => Type[?], emit: Pipe[?] => Sink)(
-      using Quotes): Expr[Tier] = g match
-    case Group.Repl(f, t)   => '{ Tier.Replicated(${ factory(emit(pipe(f, t)), portOf(f)) }) }
-    case Group.Single(f, t) => '{ Tier.Single(${ factory(emit(pipe(f, t)), portOf(f)) }) }
+  private def tierOf(g: Group, pipe: (Int, Int) => Pipe[?], portOf: Int => Type[?], emit: Pipe[?] => Sink,
+      names: (Int, Int, Boolean) => String)(using Quotes): (String, Expr[Tier]) = g match
+    case Group.Repl(f, t)   => s"replicated[${names(f, t, false)}]" -> '{ Tier.Replicated(${ factory(emit(pipe(f, t)), portOf(f)) }) }
+    case Group.Single(f, t) => s"single[${names(f, t, false)}]" -> '{ Tier.Single(${ factory(emit(pipe(f, t)), portOf(f)) }) }
 
   private def combine[S: Type](c: Fn2[S, S, S])(using Quotes): Expr[(Any, Any) => Any] =
     '{ (x: Any, y: Any) => (${ c('{ x.asInstanceOf[S] }, '{ y.asInstanceOf[S] }) }: Any) }
-
-  /** A partitioner specialised for the element type, with the key function inlined. */
-  def partitioner[A: Type](key: Fn1[A, Int])(using Quotes): Expr[Partitioner] =
-    '{
-      new Partitioner {
-        def route(array: AnyRef, offset: Int, length: Int, parts: Int): Array[AnyRef] = {
-          val in = array.asInstanceOf[Array[A]]
-          val part = new Array[Int](length)
-          val counts = new Array[Int](parts)
-          var i = 0
-          while (i < length) {
-            val k = KeyPartitioner.partition(${ key('{ in(offset + i) }) }, parts)
-            part(i) = k
-            counts(k) += 1
-            i += 1
-          }
-          val outs = new Array[AnyRef](parts)
-          var j = 0
-          while (j < parts) {
-            outs(j) = ${ Codegen.newArray[A]('{ counts(j) }) }
-            counts(j) = 0
-            j += 1
-          }
-          i = 0
-          while (i < length) {
-            val k = part(i)
-            outs(k).asInstanceOf[Array[A]](counts(k)) = in(offset + i)
-            counts(k) += 1
-            i += 1
-          }
-          outs
-        }
-      }
-    }

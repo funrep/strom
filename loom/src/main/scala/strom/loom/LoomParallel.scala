@@ -1,8 +1,8 @@
 package strom.loom
 
 import java.util.concurrent.{ArrayBlockingQueue, BlockingQueue, LinkedBlockingQueue, Semaphore, ThreadFactory}
-import java.util.concurrent.atomic.AtomicInteger
 import strom.loom.StromLoom.*
+import strom.Strom
 import strom.runtime.*
 
 /** Executes a [[strom.runtime.ParallelPlan]] on threads. Tiers are connected by bounded queues of [[strom.loom.StromLoom.Msg]].
@@ -31,6 +31,12 @@ object LoomParallel:
       tiers.init.flatten.foreach(_.interrupt())
       threads.foreach(_.join())
     def cancel(): Unit = threads.foreach(_.interrupt())
+
+  /** A parallel plan for a one-input pipeline lambda, e.g.
+   *  `LoomParallel.plan((a: Strom[Int]) => a.map(f).filter(p).take(n))`: stateless parts are
+   *  replicated, stateful ones run as single instances, an associative fold (`sum`, `count`,
+   *  `foldAssociative`) runs as per-chunk partial folds. */
+  inline def plan[A, R](inline f: Strom[A] => R): ParallelPlan[Strom.ResultOf[R]] = ${ strom.internal.Macros.parallelOf[R]('f) }
 
   private val coordination: ThreadFactory = Thread.ofVirtual().name("strom-coord-", 0).factory()
 
@@ -77,7 +83,6 @@ object LoomParallel:
           val res = if any then acc else Chunks.end(f.create(cfg.maxOut, cfg.budget))._2
           out.put(Result(res))
         })
-    case Tier.Keyed(f, partitioner) => keyed(in, out, cfg, f, partitioner)
 
   // ------------------------------------------------------------------ ordered (replicated / partial fold)
 
@@ -155,51 +160,3 @@ object LoomParallel:
           stop()
     }
     workers :+ reader :+ coordinator
-
-  // ------------------------------------------------------------------ keyed
-
-  /** A router splits each chunk by key into per-partition queues; one stateful instance per
-   *  partition; the last partition to finish sends `End`. */
-  private def keyed(in: BlockingQueue[Msg], out: BlockingQueue[Msg], cfg: Config, f: SegmentFactory[?],
-                    partitioner: Partitioner): Seq[Thread] =
-    val n = cfg.parallelism
-    val queues = Vector.fill(n)(ArrayBlockingQueue[Msg](cfg.queueCapacity))
-    val remaining = AtomicInteger(n)
-    val failed = java.util.concurrent.atomic.AtomicBoolean(false)
-    val workers = (0 until n).map { p =>
-      spawn(cfg.compute) {
-        val seg = f.create(cfg.maxOut, cfg.budget)
-        val onYield = yielder()
-        def emit(c: ArrayChunk): Unit = if c.length > 0 then out.put(Data(c.array, c.offset, c.length))
-        try
-          var running = true
-          while running do
-            queues(p).take() match
-              case d: Data => emit(Chunks.feed(seg, chunkOf(d), onYield)._1)
-              case End =>
-                val (last, res) = Chunks.end(seg, onYield)
-                emit(last)
-                if seg.isFold then out.put(Result(res))
-                running = false
-              case Failed(e) => throw e
-              case Result(_) => throw IllegalStateException("unexpected Result")
-          if remaining.decrementAndGet() == 0 && !failed.get() then out.put(End)
-        catch
-          case e: InterruptedException => throw e
-          case e: Throwable => if failed.compareAndSet(false, true) then out.put(Failed(e))
-      }
-    }
-    val router = spawn(coordination) {
-      var routing = true
-      while routing do
-        in.take() match
-          case d: Data =>
-            val parts = partitioner.route(d.array, d.offset, d.length, n)
-            for p <- 0 until n do
-              val len = java.lang.reflect.Array.getLength(parts(p))
-              if len > 0 then queues(p).put(Data(parts(p), 0, len))
-          case End => queues.foreach(_.put(End)); routing = false
-          case m @ Failed(_) => queues.foreach(_.put(m)); routing = false
-          case Result(_) => queues.foreach(_.put(Failed(IllegalStateException("unexpected Result")))); routing = false
-    }
-    workers :+ router

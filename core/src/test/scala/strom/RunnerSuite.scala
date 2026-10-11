@@ -53,13 +53,6 @@ class RunnerSuite extends munit.FunSuite:
     assert(Runner.needInput(1) eq Runner.needInput(1))
   }
 
-  test("key partitioner is stable and spreads consecutive keys") {
-    val counts = Array.fill(8)(0)
-    for k <- 0 until 80_000 do counts(KeyPartitioner.partition(k, 8)) += 1
-    assert(counts.forall(c => c > 9000 && c < 11000), counts.toList)
-    assertEquals(KeyPartitioner.partitionOf("abc", 5), KeyPartitioner.partitionOf("abc", 5))
-  }
-
   test("reorder buffer releases in sequence order") {
     val rb = ReorderBuffer[String](4)
     rb.put(2, "c"); rb.put(1, "b")

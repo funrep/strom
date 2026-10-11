@@ -14,9 +14,17 @@ private[fs2] object FusedMacro:
     f.fuse(stream)
     Expr(f.summary)
 
+  def fusedPar[S: Type](parallelism: Expr[Int], stream: Expr[S])(using Quotes): Expr[S] =
+    Fs2Fuser(Some(parallelism)).fuse(stream).asExprOf[S]
+
+  def parPlan(stream: Expr[Any])(using Quotes): Expr[String] =
+    val f = Fs2Fuser(Some('{ 1 }))
+    f.fuse(stream)
+    Expr(f.summary)
+
 /** fs2 operators: `map`, `filter`, `take`, `fold`, `flatMap` (onto `Stream.range`), `zipWith`, `collect`,
  *  `mapFilter` (cats syntax), `zipWithIndex`, `scan`, `drop`, `takeWhile`, `dropWhile`. */
-private[fs2] final class Fs2Fuser(using Quotes) extends ChainFuser:
+private[fs2] final class Fs2Fuser(par: Option[Expr[Int]] = None)(using Quotes) extends ChainFuser:
   import q.reflect.*
 
   protected val streamClass = Symbol.requiredClass("fs2.Stream")
@@ -55,6 +63,23 @@ private[fs2] final class Fs2Fuser(using Quotes) extends ChainFuser:
     case Some(Call(_, qual, "range", _, List(a, b) :: _)) if qual.symbol == StreamModule && elemOf(t.tpe) =:= TypeRepr.of[Int] =>
       Some((a.asExprOf[Int], b.asExprOf[Int]))
     case _ => None
+
+  override protected def parallelism: Option[Term] = par.map(_.asTerm)
+
+  /** `StromFs2.fusedParRun[F, B](plan, input, tag, n)(using Concurrent[F])` */
+  override protected def emitParallel(r: Run, plan: Term, input: Term, tag: Term, n: Term): Option[Term] =
+    val last = r.calls.last.term
+    val (fRepr, bRepr) = (effectOf(last.tpe), elemOf(last.tpe))
+    val concurrent = Symbol.requiredClass("cats.effect.kernel.GenConcurrent").typeRef.appliedTo(List(fRepr, TypeRepr.of[Throwable]))
+    Implicits.search(concurrent) match
+      case s: ImplicitSearchSuccess =>
+        if verbose then report.info(s"strom: ${log.last}", last.pos)
+        Some(Select.unique(Ref(Symbol.requiredModule("strom.fs2.StromFs2")), "fusedParRun").appliedToTypes(List(fRepr, bRepr))
+          .appliedToArgs(List(plan, input, tag, n, Literal(IntConstant(Segment.DefaultMaxOut)), Literal(IntConstant(Segment.DefaultBudget))))
+          .appliedTo(s.tree))
+      case _: ImplicitSearchFailure =>
+        log(log.size - 1) += ", sequential (no Concurrent)"
+        None
 
   /** `StromFs2.fusedRun[F, B](factory, inputs, tags, cede, maxOut, budget)` */
   protected def emit(r: Run, sink: Pipe.Sink): Term =

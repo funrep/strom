@@ -40,15 +40,6 @@ object Macros:
       case None => Codegen.explain(Frontend().parseSink(p), Nil)
     Expr(text)
 
-  def parallelKeyed[O: Type](f: Expr[Any], key: Expr[Any])(using Quotes): Expr[strom.runtime.ParallelPlan[O]] =
-    parallelPlan[O](f, Some(key))
-
-  private def parallelPlan[O: Type](f: Expr[Any], key: Option[Expr[Any]])(using Quotes): Expr[strom.runtime.ParallelPlan[O]] =
-    val front = Frontend()
-    front.segmentLambda(f) match
-      case Some((ports, sink)) => guarded(Parallel.plan[O](sink, ports, key, front))
-      case None => quotes.reflect.report.errorAndAbort("strom: expected a lambda literal")
-
   def segmentOf[R: Type](f: Expr[Any])(using Quotes): Expr[strom.runtime.SegmentFactory[strom.Strom.ResultOf[R]]] =
     Frontend().segmentLambda(f) match
       case Some((ports, sink)) => sinkType(sink) match
@@ -57,9 +48,8 @@ object Macros:
       case None => quotes.reflect.report.errorAndAbort("strom: expected a lambda literal with typed Strom parameters")
 
   def parallelOf[R: Type](f: Expr[Any])(using Quotes): Expr[strom.runtime.ParallelPlan[strom.Strom.ResultOf[R]]] =
-    val front = Frontend()
-    front.segmentLambda(f) match
+    Frontend().segmentLambda(f) match
       case Some((ports, sink)) => sinkType(sink) match
-        case '[o] => guarded(Parallel.plan[o](sink, ports, None, front))
+        case '[o] => guarded(Parallel.plan[o](sink, ports))
           .asInstanceOf[Expr[strom.runtime.ParallelPlan[strom.Strom.ResultOf[R]]]]
       case None => quotes.reflect.report.errorAndAbort("strom: expected a lambda literal with a typed Strom parameter")

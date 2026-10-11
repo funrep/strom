@@ -8,14 +8,14 @@ run exactly as before. Built on Scala 3 staging and Kiselyov et al.'s strymonas
 ([References](#references)).
 
 ```scala
-import strom.fs2.StromFs2
+import strom.fs2.*
 
-val total: Stream[IO, Long] = StromFs2.fused {
+val total: Stream[IO, Long] =
   requests
     .map(parse).filter(_.status >= 500)     // fused
     .evalMap(logIt)                         // kept: an effect
     .map(_.latencyMs).fold(0L)(_ + _)       // fused
-}
+    .fused
 ```
 
 Results are identical to the unfused code. Typical gains: ~8× on map/filter chains, ~100× on
@@ -34,12 +34,11 @@ Scala 3.9, JDK 21+.
 ## `fused`
 
 ```scala
-StromFs2.fused { in.map(f).filter(p).evalMap(save).map(g).take(100L) }
-StromZio.fused { in.map(f).filter(p).mapZIO(save).map(g) }
-StromFs2.fusedPlan(…)   // compile-time string: "fused: map → filter … / kept: evalMap"
-
-import strom.fs2.*      // or strom.zio.*: the same as methods
-in.map(f).filter(p).evalMap(save).map(g).take(100L).fused   // .fusedPar(n), .fusedPlan
+import strom.fs2.*   // or strom.zio.*
+in.map(f).filter(p).evalMap(save).map(g).take(100L).fused
+in.map(f).filter(p).mapZIO(save).map(g).fused     // ZIO
+in.map(f).filter(p).evalMap(save).fusedPlan       // compile-time string: "fused: map → filter / kept: evalMap"
+StromFs2.fused { … }                              // the same, as a wrapper
 ```
 
 The result has exactly the type you passed in (`Stream[IO, A]`, `ZStream[R, E, A]`); no Ström
@@ -61,12 +60,10 @@ else stays as written.
 ## `fusedPar`: several cores
 
 ```scala
-StromFs2.fusedPar(8) {
-  in.map(parse).filter(valid).map(score)   // 8 workers, order kept
-    .take(1000L)                           // stateful: one instance
-    .fold(0L)(_ + _)
-}
-StromZio.fusedPar(8) { … }
+in.map(parse).filter(valid).map(score)   // 8 workers, order kept
+  .take(1000L)                           // stateful: one instance
+  .fold(0L)(_ + _)
+  .fusedPar(8)
 StromFs2.fusedParPlan(…)  // "… parallel: replicated[map → filter → map] | single[take → fold]"
 ```
 

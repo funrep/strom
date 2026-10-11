@@ -101,8 +101,22 @@ abstract class ChainFuser(using val q: Quotes):
     // Stream values are pure descriptions, so the synthetic vals can be substituted back.
     case Block(stats, e) if stats.forall(isSyntheticVal) =>
       val vals = stats.collect { case v: ValDef => v }
-      strip(vals.foldRight(e)((v, acc) => Frontend.subst(acc, List(v.symbol), List(v.rhs.get.asExpr)).asInstanceOf[Term]))
+      // A default argument `qual$1.op$default$2` would copy the receiver chain (and every lambda
+      // in it) a second time: evaluate it on an empty stream instead (default values don't
+      // depend on the receiver).
+      val body = onEmpty.transformTerm(e)(Symbol.spliceOwner)
+      strip(vals.foldRight(body)((v, acc) =>
+        Frontend.subst(acc, List(v.symbol), List(onEmpty.transformTerm(v.rhs.get)(Symbol.spliceOwner).asExpr)).asInstanceOf[Term]))
     case _                  => t
+
+  /** An empty stream of the adapter's type, as a receiver for default-argument getters. */
+  protected def emptyStream: Term
+
+  /** Rewrites `stream.op$default$N` to `emptyStream.op$default$N`. */
+  private object onEmpty extends TreeMap:
+    override def transformTerm(t: Term)(owner: Symbol): Term = t match
+      case Select(q, name) if name.contains("$default$") && isStream(q.tpe) => Select(emptyStream, t.symbol)
+      case _ => super.transformTerm(t)(owner)
 
   private def isSyntheticVal(s: Statement): Boolean = s match
     case v: ValDef => v.rhs.isDefined && !v.symbol.flags.is(Flags.Mutable) &&

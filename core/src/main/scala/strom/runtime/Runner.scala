@@ -14,6 +14,10 @@ import strom.runtime.Segment.Status
  *     the last `Yield`, so yielding (which costs microseconds in an effect system) stays rare.
  *   - [[Runner.Done]]: the pipeline finished; for a fold, [[result]] holds the value.
  *
+ *  If a step throws after producing outputs, `next()` first returns `Emit` with those outputs and
+ *  throws the error on the following call: a consumer that stops before (e.g. a `take`) never
+ *  sees it.
+ *
  *  Signals are preallocated, so driving a runner allocates nothing.
  */
 final class Runner[Out](val segment: Segment, sliceNanos: Long = Segment.DefaultSliceNanos):
@@ -21,11 +25,14 @@ final class Runner[Out](val segment: Segment, sliceNanos: Long = Segment.Default
 
   private var pending: Int = Status.Continue
   private val slice = TimeSlice(sliceNanos)
+  /** A step failed after producing outputs: they are emitted first, the error on the next call. */
+  private var failure: Throwable = null
 
   def offer(port: Int, array: AnyRef, offset: Int, length: Int): Unit = segment.offer(port, array, offset, length)
   def endOfInput(port: Int): Unit = segment.endOfInput(port)
 
   def next(): Signal =
+    if failure ne null then throw failure
     var signal: Signal = null
     while signal eq null do
       val st =
@@ -34,7 +41,14 @@ final class Runner[Out](val segment: Segment, sliceNanos: Long = Segment.Default
           pending = Status.Continue
           p
         else
-          val s = segment.step()
+          val s =
+            try segment.step()
+            catch
+              case e: Throwable if segment.outLen > 0 =>
+                // Hand over what the step produced before failing (as plain chunked code would
+                // have emitted it), then fail.
+                failure = e
+                Status.Emit
           if segment.outLen > 0 then
             // A full buffer needs nothing from the driver once drained: just step again.
             pending = if s == Status.Emit then Status.Continue else s

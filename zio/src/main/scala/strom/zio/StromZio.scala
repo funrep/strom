@@ -1,6 +1,7 @@
 package strom.zio
 
 import scala.reflect.ClassTag
+import scala.util.Try
 import _root_.zio.{Chunk, Trace, ZIO}
 import _root_.zio.stream.{ZChannel, ZPipeline, ZStream}
 import strom.runtime.*
@@ -61,15 +62,35 @@ object StromZio:
       using Trace): ZStream[R, E, B] =
     require(parallelism > 0, "parallelism must be positive")
     val in = fromElements(input.asInstanceOf[ZStream[R, E, Any]], tag.asInstanceOf[ClassTag[Any]])
+    // `mapZIOPar` works ahead of demand, and pulls its upstream ahead too. Failures, of the work
+    // (a defect, like a throwing `map`) or of the upstream, are held as values and raised only
+    // when their turn comes in order, after the outputs produced before them: work that is never
+    // needed can't fail the stream.
+    def ahead(s: ZStream[R, E, ArrayChunk])(work: ArrayChunk => Processed): ZStream[R, E, ArrayChunk] =
+      val empty = ArrayChunk(Array.empty[Any], 0, 0)
+      s.map(Right(_): Either[_root_.zio.Cause[E], ArrayChunk]).catchAllCause(c => ZStream.succeed(Left(c)))
+        .mapZIOPar(parallelism) {
+          case Right(c) => ZIO.succeed(work(c) match
+            case Processed(out, null) => (out, null)
+            case Processed(out, e)    => (out, _root_.zio.Cause.die(e)))
+          case Left(c) => ZIO.succeed((empty, c))
+        }
+        .flatMap { (chunk, cause) =>
+          val out = if chunk.length > 0 then ZStream.succeed(chunk) else ZStream.empty
+          if cause eq null then out else out ++ ZStream.failCause(cause)
+        }
     val last = plan.tiers.foldLeft(in) { (s, tier) =>
       tier match
         case Tier.Replicated(f) =>
           val pool = SegmentPool(f, maxOut, budget)
-          s.mapZIOPar(parallelism)(c => ZIO.succeed(pool.use(seg => Chunks.processStateless(seg, c))))
+          ahead(s)(c => pool.use(seg => Chunks.processUntilFailure(seg, c)))
         case Tier.PartialFold(f, combine) =>
           val pool = SegmentPool(f, maxOut, budget)
           ZStream.fromZIO(
-            s.mapZIOPar(parallelism)(c => ZIO.succeed(pool.use(seg => Chunks.partialFold(seg, c))))
+            ahead(s)(c => Try(pool.use(seg => Chunks.partialFold(seg, c))) match
+              case scala.util.Success(r) => Processed(ArrayChunk.single(r), null)
+              case scala.util.Failure(e) => Processed(ArrayChunk(Array.empty[Any], 0, 0), e))
+              .filter(_.length > 0).map(c => java.lang.reflect.Array.get(c.array, c.offset))
               .runFold(Option.empty[Any])((acc, r) => Some(acc.fold(r)(combine(_, r))))
               .map(_.getOrElse(Chunks.end(f.create(maxOut, budget))._2))
           ).map(ArrayChunk.single)

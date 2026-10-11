@@ -61,6 +61,8 @@ private[zio] final class ZioFuser(par: Option[Expr[Int]] = None)(using Quotes) e
         case _ => None
     case _ => None
 
+  protected def emptyStream: Term = '{ ZStream.empty }.asTerm
+
   override protected def parallelism: Option[Term] = par.map(_.asTerm)
 
   /** `StromZio.fusedParRun[R, E, B](plan, input, tag, n, maxOut, budget)(trace)` */

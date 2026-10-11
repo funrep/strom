@@ -409,6 +409,11 @@ final class Gen(using val q: Quotes)(
           k => lp.init(a => rp.init(b => k((a, b)))),
           s => '{ Math.min(${ lp.upb(s._1) }, ${ rp.upb(s._2) }) },
           (s, i) => k => lp.index(s._1, i)(a => rp.index(s._2, i)(b => letIn(f(a, b))(k))))))
+      // A side reads an input port (an effectful stream): get a left element first, then the
+      // right one, and stop as soon as either side ends. That is the order in which fs2's zip
+      // pulls its sides, so upstream effects run exactly as without fusion (even when the other
+      // side is a pure range that has just run out).
+      case _ if suspends(l) || suspends(r) => lab("zip:left-first")(leftFirst(l, r, f))
       // Two exactly-one producers, at most one of which can suspend: step both in lock-step,
       // stepping the one that can suspend first so that no element is ever consumed and lost.
       case (Linear(lp), Linear(rp)) if card(lp) == Card.Many && card(rp) == Card.Many && !(lp.suspends && rp.suspends) =>
@@ -432,6 +437,20 @@ final class Gen(using val q: Quotes)(
       case _ =>
         if depth(r) <= depth(l) then lab("zip:pull-right")(drivePull[A, B, C](l, pull(r), f))
         else lab("zip:pull-left")(drivePull[B, A, C](r, pull(l), (b, a) => f(a, b)))
+
+  /** Both sides as pulls: fill the left; only when it holds an element, fill the right. The
+   *  elements wait in state, so a suspension while filling the right loses nothing. */
+  private def leftFirst[A, B, C: Type](l: StStream[A], r: StStream[B], f: (Expr[A], Expr[B]) => Expr[C]): StStream[C] =
+    val lp = pull(l)
+    val rp = pull(r)
+    Linear(labeled(UnfoldP[C, Unit](
+      k => seq(lp.init, rp.init, k(())),
+      _ => '{ (${ lp.have.get } || !${ lp.ended.get }) && (${ rp.have.get } || !${ rp.ended.get }) },
+      Card.AtMost1,
+      _ => k =>
+        val both = seq(lp.have := '{ false }, rp.have := '{ false }, letIn(f(lp.cur.get, rp.cur.get))(k))
+        '{ ${ lp.fill }; if (${ lp.have.get }) { ${ rp.fill }; if (${ rp.have.get }) $both } },
+      true), "zip:left-first").tap(_.composite = true))
 
   /** How deeply nested a stream is: the cost of linearising it. */
   private def depth(s: StStream[?]): Int = s match

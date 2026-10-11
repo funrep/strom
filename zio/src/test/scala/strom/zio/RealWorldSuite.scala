@@ -44,8 +44,7 @@ class RealWorldSuite extends munit.FunSuite:
     val (po, pl) = logged(p)
     val (fo, fl) = logged(f)
     assertEquals(fo, po)
-    assertEquals(fl.filter(_.startsWith("out")), pl.filter(_.startsWith("out")))
-    assert(pl.filter(_.startsWith("in")).toSet.subsetOf(fl.filter(_.startsWith("in")).toSet))
+    assertEquals(fl, pl) // every effect, in the same order, the same number of times
   }
 
   test("take on an infinite effectful source stops") {

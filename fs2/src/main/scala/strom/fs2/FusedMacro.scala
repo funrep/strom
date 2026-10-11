@@ -89,6 +89,8 @@ private[fs2] final class Fs2Fuser(par: Option[Expr[Int]] = None)(using Quotes) e
           Pipe.Fn1(s => '{ $s.length }), Pipe.Fn2((s, i) => '{ $s.values($s.offset + $i) }))
       }
 
+  protected def emptyStream: Term = '{ _root_.fs2.Stream.empty }.asTerm
+
   override protected def parallelism: Option[Term] = par.map(_.asTerm)
 
   /** `StromFs2.fusedParRun[F, B](plan, input, tag, n)(using Concurrent[F])` */

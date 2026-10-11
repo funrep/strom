@@ -2,6 +2,9 @@ package strom.runtime
 
 import strom.runtime.Segment.Status
 
+/** The outputs of a chunk, and the error that stopped it (null if none). */
+final case class Processed(chunk: ArrayChunk, error: Throwable)
+
 /** A slice of a primitive array: the unit of work between tiers. */
 final case class ArrayChunk(array: AnyRef, offset: Int, length: Int):
   def elements: Iterator[Any] = Iterator.range(offset, offset + length).map(java.lang.reflect.Array.get(array, _))
@@ -25,7 +28,7 @@ final class SegmentPool(f: SegmentFactory[?], maxOut: Int, budget: Int):
   def use[X](body: Segment => X): X =
     val seg = Option(free.poll()).getOrElse(f.create(maxOut, budget))
     val x = body(seg)
-    free.offer(seg) // only returned on success: a poisoned instance is dropped
+    if !seg.isPoisoned then free.offer(seg) // a poisoned instance is dropped
     x
 
 /** Synchronous, chunk-at-a-time operations on segments, shared by all parallel executors.
@@ -53,6 +56,23 @@ object Chunks:
     drain(seg, out, onYield)
     seg.release(0)
     out.result()
+
+  /** Like [[processStateless]], but a failure is returned instead of thrown, together with the
+   *  outputs produced before it: a parallel executor working ahead of demand can then deliver
+   *  those, and raise the error only if the consumer gets that far. */
+  def processUntilFailure(seg: Segment, chunk: ArrayChunk, onYield: () => Unit = NoYield): Processed =
+    val out = Growable(seg.out)
+    try
+      seg.offer(0, chunk.array, chunk.offset, chunk.length)
+      drain(seg, out, onYield)
+      seg.release(0)
+      Processed(out.result(), null)
+    catch
+      case e: InterruptedException => throw e
+      case e: Throwable =>
+        // Outputs of the failing step that were complete before the exception.
+        if seg.out ne null then out.append(seg.out, seg.outLen)
+        Processed(out.result(), e)
 
   /** Folds one chunk from scratch (the segment is reset first); returns the partial result. */
   def partialFold(seg: Segment, chunk: ArrayChunk, onYield: () => Unit = NoYield): Any =

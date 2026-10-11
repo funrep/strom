@@ -72,7 +72,11 @@ object LoomParallel:
     case Tier.Single(f) =>
       Seq(spawn(cfg.compute)(StromLoom.run(f, Vector(in), out, cfg.maxOut, cfg.budget)))
     case Tier.Replicated(f) =>
-      ordered(in, out, cfg, f, (seg, c, y) => Chunks.processStateless(seg, c, y),
+      ordered(in, out, cfg, f, (seg, c, y) =>
+          // The outputs before a failure are delivered; the failure itself when its turn comes.
+          Chunks.processUntilFailure(seg, c, y) match
+            case Processed(chunk, null) => chunk
+            case Processed(chunk, e)    => Thrown(e, chunk),
         (acc, r) => { val c = r.asInstanceOf[ArrayChunk]; if c.length > 0 then out.put(Data(c.array, c.offset, c.length)); acc },
         _ => ())
     case Tier.PartialFold(f, combine) =>
@@ -92,6 +96,8 @@ object LoomParallel:
   private final case class Done(seq: Long, value: Any) extends Event
   private final case class Fail(e: Throwable) extends Event
   private final class Box(val value: Any)
+  /** A chunk whose processing failed: reported only when its turn comes in input order. */
+  private final class Thrown(val error: Throwable, val before: ArrayChunk = null)
 
   /** Chunks go round-robin to N workers; results are released in input order through a
    *  [[ReorderBuffer]] whose window is enforced by a semaphore on the reader. */
@@ -104,15 +110,21 @@ object LoomParallel:
     val jobs = Vector.fill(n)(LinkedBlockingQueue[(Long, ArrayChunk)]())
     val workers = (0 until n).map { w =>
       spawn(cfg.compute) {
-        val seg = f.create(cfg.maxOut, cfg.budget)
+        var seg = f.create(cfg.maxOut, cfg.budget)
         val onYield = yielder()
         while true do
           val (seq, chunk) = jobs(w).take()
           if seq < 0 then throw InterruptedException() // stop
-          try events.put(Done(seq, work(seg, chunk, onYield)))
+          try
+            events.put(Done(seq, work(seg, chunk, onYield)))
+            if seg.isPoisoned then seg = f.create(cfg.maxOut, cfg.budget) // failed (result held)
           catch
             case e: InterruptedException => throw e
-            case e: Throwable => events.put(Fail(e)); throw InterruptedException()
+            case e: Throwable =>
+              // Chunks are processed ahead of demand: the failure is held until its turn, so work
+              // that is never needed (past a downstream `take`) can't fail the plan.
+              events.put(Done(seq, Thrown(e)))
+              seg = f.create(cfg.maxOut, cfg.budget) // the failed instance is poisoned
       }
     }
     val reader = spawn(coordination) {
@@ -135,6 +147,23 @@ object LoomParallel:
       def stop(): Unit =
         jobs.foreach(_.put((-1L, null)))
         running = false
+      def fail(e: Throwable): Unit =
+        out.put(Failed(e))
+        stop()
+        reader.interrupt()
+      /** Delivers results in input order; a held failure is reported when its turn comes. */
+      def drain(): Unit =
+        var b = reorder.poll()
+        while b != null && running do
+          b.value match
+            case t: Thrown =>
+              if (t.before ne null) && t.before.length > 0 then acc = deliver(acc, t.before)
+              fail(t.error)
+            case v =>
+              acc = deliver(acc, v)
+              inFlight.release()
+              permits.release()
+              b = reorder.poll()
       while running do
         events.take() match
           case Input(chunk) =>
@@ -144,16 +173,16 @@ object LoomParallel:
           case InputEnd => ended = true
           case Done(s, v) =>
             reorder.put(s, Box(v))
-            var b = reorder.poll()
-            while b != null do
-              acc = deliver(acc, b.value)
-              inFlight.release()
-              permits.release()
-              b = reorder.poll()
+            drain()
           case Fail(e) =>
-            out.put(Failed(e))
-            stop()
-            reader.interrupt()
+            // An upstream failure takes its place in the order: earlier chunks are delivered
+            // first, and a plan that stops before reaching it never reports it.
+            if inFlight.tryAcquire() then
+              reorder.put(seq, Box(Thrown(e)))
+              seq += 1
+              ended = true
+              drain()
+            else fail(e)
         if running && ended && reorder.expected == seq then
           finish(acc)
           out.put(End)

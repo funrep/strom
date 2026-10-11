@@ -1,6 +1,7 @@
 package strom.fs2
 
 import scala.reflect.ClassTag
+import scala.util.Try
 import cats.effect.kernel.{Concurrent, Spawn}
 import cats.syntax.all.*
 import _root_.fs2.{Chunk, Pull, Stream}
@@ -78,15 +79,30 @@ object StromFs2:
       maxOut: Int = Segment.DefaultMaxOut, budget: Int = Segment.DefaultBudget)(using F: Concurrent[F]): Stream[F, B] =
     require(parallelism > 0, "parallelism must be positive")
     def cpu[X](x: => X): F[X] = F.unit.map(_ => x)
+    // `parEvalMap` works ahead of demand, and pulls its upstream ahead too. Failures, of the work
+    // or of the upstream, are held as values and raised only when their turn comes in order,
+    // after the outputs produced before them: work that is never needed (past a downstream
+    // `take`) can't fail the stream.
+    def ahead(s: Stream[F, ArrayChunk])(work: ArrayChunk => Processed): Stream[F, ArrayChunk] =
+      s.attempt.parEvalMap(parallelism) {
+        case Right(c) => cpu(work(c))
+        case Left(e)  => F.pure(Processed(ArrayChunk(Array.empty[Any], 0, 0), e))
+      }.flatMap { p =>
+        val out = if p.chunk.length > 0 then Stream.emit(p.chunk) else Stream.empty
+        if p.error eq null then out else out ++ Stream.raiseError[F](p.error)
+      }
     val in = fromElements(input.asInstanceOf[Stream[F, Any]])(using tag.asInstanceOf[ClassTag[Any]])
     val last = plan.tiers.foldLeft(in) { (s, tier) =>
       tier match
         case Tier.Replicated(f) =>
           val pool = SegmentPool(f, maxOut, budget)
-          s.parEvalMap(parallelism)(c => cpu(pool.use(seg => Chunks.processStateless(seg, c))))
+          ahead(s)(c => pool.use(seg => Chunks.processUntilFailure(seg, c)))
         case Tier.PartialFold(f, combine) =>
           val pool = SegmentPool(f, maxOut, budget)
-          val partials = s.parEvalMap(parallelism)(c => cpu(pool.use(seg => Chunks.partialFold(seg, c))))
+          val partials = ahead(s)(c => Try(pool.use(seg => Chunks.partialFold(seg, c))) match
+            case scala.util.Success(r) => Processed(ArrayChunk.single(r), null)
+            case scala.util.Failure(e) => Processed(ArrayChunk(Array.empty[Any], 0, 0), e))
+            .filter(_.length > 0).map(c => java.lang.reflect.Array.get(c.array, c.offset))
           Stream.eval(partials.compile.fold(Option.empty[Any])((acc, r) => Some(acc.fold(r)(combine(_, r))))
             .map(_.getOrElse(Chunks.end(f.create(maxOut, budget))._2)))
             .map(ArrayChunk.single)

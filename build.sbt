@@ -49,6 +49,7 @@ lazy val fs2 = (project in file("fs2"))
     name := "strom-fs2",
     libraryDependencies ++= Seq("co.fs2" %% "fs2-core" % "3.14.0") ++ testDeps,
     Test / fork := true,
+    Test / sourceGenerators += Def.task(FuzzGen.fs2((Test / sourceManaged).value)).taskValue,
   )
 
 // strom-zio: runs compiled segments as ZIO stream pipelines (ZChannel, yieldNow, Chunk.fromArray).
@@ -59,6 +60,7 @@ lazy val zio = (project in file("zio"))
     name := "strom-zio",
     libraryDependencies ++= Seq("dev.zio" %% "zio-streams" % "2.1.26") ++ testDeps,
     Test / fork := true,
+    Test / sourceGenerators += Def.task(FuzzGen.zio((Test / sourceManaged).value)).taskValue,
   )
 
 // strom-loom: runs compiled segments on JDK virtual threads over blocking queues. No dependencies.

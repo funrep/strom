@@ -82,3 +82,19 @@ lazy val bench = (project in file("bench"))
     publish / skip := true,
     libraryDependencies += "dev.zio" %% "zio-streams" % "2.1.26",
   )
+
+// Prototype, not part of Ström: fuse plain cats-effect IO blocks (proto/iofuse/README.md).
+// Not aggregated into root and not published.
+lazy val iofuse = (project in file("proto/iofuse"))
+  .settings(
+    name := "iofuse",
+    publish / skip := true,
+    libraryDependencies ++= Seq("org.typelevel" %% "cats-effect" % "3.7.1") ++ testDeps,
+    Test / fork := true,
+    Test / scalacOptions += "-Xcheck-macros",
+  )
+
+lazy val iofuseBench = (project in file("proto/iofuse/bench"))
+  .dependsOn(iofuse)
+  .enablePlugins(JmhPlugin)
+  .settings(name := "iofuse-bench", publish / skip := true)

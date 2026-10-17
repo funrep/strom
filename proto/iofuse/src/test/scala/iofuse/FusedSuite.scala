@@ -146,6 +146,13 @@ class FusedSuite extends munit.FunSuite:
       loop(0))
   }
 
+  test("a local def used as a value stays lazy; reusing its IO reruns it") {
+    same(log =>
+      def loop(i: Int): IO[Int] = if i == 3 then IO.pure(i) else IO(log += s"step $i").flatMap(_ => loop(i + 1))
+      val x = loop(0)
+      IO(log += "start") *> x *> x)
+  }
+
   test("non-literal functions") {
     val f: Int => IO[Int] = x => IO.pure(x + 1)
     val g: Int => Int = _ * 2
@@ -185,4 +192,59 @@ class FusedSuite extends munit.FunSuite:
       assert(r.left.exists(_.isInstanceOf[TimeoutException]), r)
       assert(a.get > 0 && b.get > 0, (a.get, b.get))
     finally rt.shutdown()
+  }
+
+  test("a synchronous part with a handler that is not: recover by looping, fail in the handler, suspend") {
+    // The handler calls the loop: compiled as try/catch and a jump. Deep, so a nested handler would show.
+    assertEquals(same(log =>
+      def loop(i: Int): IO[Int] =
+        if i < 200000 then IO.raiseError[Int](Boom("x")).map(_ + 1).handleErrorWith(_ => loop(i + 1))
+        else IO.pure(i)
+      loop(0)), 200000)
+    // Only some iterations fail; the value of the others goes on.
+    same(log =>
+      def loop(i: Int, acc: Int): IO[Int] =
+        if i == 3000 then IO.pure(acc)
+        else IO(if i % 7 == 0 then throw Boom(s"b$i") else i)
+          .handleErrorWith(e => opaque(log, e.getMessage).as(-1))
+          .flatMap(x => loop(i + 1, acc + x))
+      loop(0, 0))
+    // An error in the handler is not caught by the same handler, but by the one outside.
+    assertEquals(same(log =>
+      (IO(log += "a") *> IO.raiseError[Int](Boom("first")))
+        .handleErrorWith(e => opaque(log, e.getMessage) *> IO.raiseError[Int](Boom("second")))
+        .handleErrorWith(e => IO(log += s"outer ${e.getMessage}").as(7))), 7)
+    // A handler that suspends, in a for-comprehension with more after it.
+    same(log =>
+      for
+        a <- lookup(1)
+        b <- IO(if a > 5 then throw Boom("big") else a).handleErrorWith(e => lookup(2).flatTap(_ => opaque(log, e.getMessage)))
+        c <- lookup(b)
+      yield a + b + c)
+  }
+
+  test("code that fusing would save nothing on is left as written; a def with nothing to save stays a def") {
+    // Only opaque calls and recursion: the block and the def as written.
+    val opaqueLoop = IOFuse.show {
+      def loop(i: Int, acc: Int): IO[Int] = if i == 0 then IO.pure(acc) else lookup(i).flatMap(x => loop(i - 1, acc + x))
+      loop(10, 0)
+    }
+    assert(!opaqueLoop.contains("$run") && !opaqueLoop.contains("while"), opaqueLoop)
+    // One synchronous step makes it worth it.
+    val withStep = IOFuse.show {
+      def loop(i: Int, acc: Int): IO[Int] = if i == 0 then IO.pure(acc) else lookup(i).map(_ + 1).flatMap(x => loop(i - 1, acc + x))
+      loop(10, 0)
+    }
+    assert(withStep.contains("$run"), withStep)
+    // A fused block with a def that saves nothing: the block is compiled, the def kept, and the
+    // result is the plain one.
+    assertEquals(same(log =>
+      def fetch(xs: List[Int], acc: Int): IO[Int] = xs match
+        case Nil     => IO.pure(acc)
+        case x :: tl => lookup(x).flatMap(v => fetch(tl, acc + v))
+      for
+        a <- IO(log += "start").as(3)
+        b <- fetch(List.tabulate(a)(identity), 0)
+        _ <- opaque(log, s"b $b")
+      yield a + b), 33)
   }

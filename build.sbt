@@ -89,9 +89,14 @@ lazy val iofuse = (project in file("proto/iofuse"))
   .settings(
     name := "iofuse",
     publish / skip := true,
-    libraryDependencies ++= Seq("org.typelevel" %% "cats-effect" % "3.7.1") ++ testDeps,
+    libraryDependencies ++= Seq("org.typelevel" %% "cats-effect" % "3.7.1", "dev.zio" %% "zio" % "2.1.26") ++ testDeps,
+    // Virtual time for the tests around sleep and timeouts.
+    libraryDependencies ++= Seq("org.typelevel" %% "cats-effect-testkit" % "3.7.1" % Test, "dev.zio" %% "zio-test" % "2.1.26" % Test),
     Test / fork := true,
     Test / scalacOptions += "-Xcheck-macros",
+    Test / sourceGenerators += Def.task(IOFuzzGen((Test / sourceManaged).value)).taskValue,
+    // The generated fuzz programs call defs by value after effects on purpose: no notes for those.
+    Test / compile := (Test / compile).dependsOn(Def.task { sys.props("iofuse.notes") = "off" }).value,
   )
 
 lazy val iofuseBench = (project in file("proto/iofuse/bench"))

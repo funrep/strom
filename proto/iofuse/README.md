@@ -2,102 +2,102 @@
 
 *AI-generated code and docs (Claude). Experimental. Not part of Ström and not published.*
 
-Ström fuses streams. This tries the same idea on ordinary `IO` code. `IOFuse.fused { ... }` (or
-`.fused`) compiles a block of cats-effect `IO` into plain Scala, and keeps `IO` only where it is
-needed.
+Wrap a method's body in `IOFuse.fused`, and its effect code is compiled into plain Scala. Your
+code stays the same, and so do its results. It just runs faster.
 
 ```scala
 import iofuse.*
 
-val program: IO[Long] = IOFuse.fused {
-  def loop(i: Int, acc: Long): IO[Long] =
-    if i == n then IO.pure(acc)
-    else
-      for
-        a <- IO(i * 7)
-        b <- if a % 3 == 0 then IO.pure(a + 1) else repo.lookup(a)   // repo.lookup is opaque
-        r <- loop(i + 1, acc + b)
-      yield r
-  loop(0, 0L)
+def checkout(order: Order): IO[Receipt] = IOFuse.fused {
+  for
+    _     <- if order.items.isEmpty then IO.raiseError(Rejected("empty")) else IO.unit
+    user  <- users.find(order.user)                 // a service call: stays a call
+    total <- priceAll(order.items, 0L)              // a local def: compiled too
+    disc   = if user.vip then total / 10 else 0L
+    _     <- sales.record(total - disc)
+  yield Receipt(order.id, total - disc)
 }
 ```
 
-## How it works
+Works with cats-effect `IO` and ZIO.
 
-1. **Parse.** The macro recognises a fixed set of operations:
-   - `pure`, `delay`/`IO(...)`, `unit`, `raiseError`, `defer`;
-   - `map`, `flatMap`, `*>`, `>>`, `<*`, `as`, `void`;
-   - `if`, `match`, `handleErrorWith`, `attempt`;
-   - local `def`s returning `IO`.
+## Where to put it
 
-   Any other `IO` value is **opaque**: a method call, `ref.update`, `IO.sleep`, and so on.
-2. **Synchronous parts become direct code.** `IO(x * 7).map(_ + 1)` becomes
-   `val v = x * 7; v + 1`, with no IO nodes and no closures.
-3. **An opaque call ends the synchronous run** with `opaque.flatMap(v => rest)`. The runtime still
-   handles everything there: async boundaries, cancelation, masks.
-4. **Loops.** A local `def` that calls itself in tail position becomes a `while` loop. It runs
-   synchronously until it reaches an opaque call. It calls `IO.cede` every 1024 iterations, which
-   matches cats-effect's default auto-yield (cancelation checks every 512, auto-yield every 1024).
-5. **Errors.**
-   - In synchronous code, a throw or `raiseError` becomes `throw`, and the runtime turns it into an
-     `IO` error.
-   - `handleErrorWith` and `attempt` become `try`/`catch` around synchronous code, and a real
-     `handleErrorWith` around opaque code.
-6. **`yield r` (identity `map`) is dropped**, so a loop at the end of a for-comprehension stays a
-   tail call.
+**Put it on each method you want faster: a request handler, a processing loop, a validation
+step.** One `fused` at the top of your program does not reach down into the methods it calls.
+iofuse compiles only the code written inside the block, including local `def`s. A call to
+another method stays an ordinary call; wrap that method too if you want it fused.
 
-`IOFuse.show { ... }` prints the generated code.
+**You don't have to choose carefully.** If a block has nothing to gain (only service calls and
+the `flatMap`s between them), iofuse leaves it exactly as you wrote it.
 
-## Numbers
+## What you get
 
-Each program loops 10 000 times. The numbers are ns and bytes allocated per iteration, from JMH with
-`-prof gc` (`iofuseBench/Jmh/run -prof gc`). See [IOBench.scala](bench/src/main/scala/iofuse/bench/IOBench.scala).
+- **Synchronous effect code is 2× to 60× faster** and stops allocating. This covers loops,
+  validation and error recovery, and anything that is `pure` / `delay` / `map` / `flatMap` /
+  `handleErrorWith` between real effects.
+- **Service code that is mostly calls is a few percent faster**, because the calls themselves are
+  not touched.
+- **Nothing measured is slower.**
+- **The behaviour is the same:** same values, same errors, same order of effects, same
+  cancelation and fairness. It is checked by differential tests and fuzzers on both libraries.
 
-| Program, per iteration | Plain IO | Fused |
+## Benchmarks
+
+JMH, Apple M1, time per operation, plain → fused.
+
+| Program | cats-effect | ZIO |
 |---|---|---|
-| `syncLoop`: `delay` + `flatMap` | 16.8 ns / 96 B | 1.7 ns / 0 B |
-| `forComp`: a six-step sync for-comprehension | 118 ns / 504 B | 2.3 ns / 0 B |
-| `errors`: sync step, fails 1 in 10, recovered | 463 ns / 728 B | 35 ns / 73 B |
-| `refLoop`: sync steps + one `Ref.update` | 57 ns / 328 B | 26 ns / 128 B |
-| `opaqueOnly`: two opaque calls, nothing else | 45 ns / 168 B | 35 ns / 208 B |
+| cats-effect's `HandleError` benchmark | 57–72 → 1.2 ns (**48–60×**) | |
+| cats-effect's `DeepBind` / `ShallowBind` (pure, delay) | 11–17 → 1.2 ns (**8–13×**) | |
+| cats-effect's `DeepBind` / `ShallowBind` (with `cede`) | 46–50 → 25 ns (**2×**) | |
+| cats-effect's `Attempt` benchmark | 21–46 → 15 ns (**1.5–3×**) | |
+| six synchronous steps in a loop | 112 → 2.2 ns (**51×**) | 115 → 2.5 ns (**46×**) |
+| a step that fails 1 in 10, recovered | 461 → 35 ns (**13×**) | 47 → 3.1 ns (**15×**) |
+| sync steps + one `Ref.update` per iteration | 55 → 21 ns (**2.6×**) | 63 → 29 ns (**2.2×**) |
+| order checkout handler (service calls, a `Ref`, validation) | 446 → 420 ns (**6%**) | 376 → 348 ns (**8%**) |
+| only service calls (`Ref.modify` loop, `IO.both`) | unchanged | unchanged |
 
-How much it saves depends on the share of synchronous work. Opaque-only code gets a little faster
-but allocates more, because each nested continuation captures the loop state. A single frame
-object per run, with a program counter, would fix that. That is not built yet.
+The first four rows are cats-effect's own run-loop benchmarks, copied as written. The checkout
+handler is a realistic request handler: it validates the order, looks the user up, prices the line
+items, reserves stock in a `Ref` and records the sale. All of it is in
+[bench/](bench/src/main/scala/iofuse/bench/): run `iofuseBench/Jmh/run -prof gc`.
 
-## Tests
+With real I/O (database or network calls at tens of microseconds each), handler gains shrink in
+proportion. The large gains are in code that does real work between its effects.
 
-[FusedSuite](src/test/scala/iofuse/FusedSuite.scala) runs every program both plain and fused, and
-compares the result (or the error) and the effect log. It covers:
+## Details
 
-- loops of a million iterations;
-- Ref-heavy loops;
-- join points in `match`;
-- non-tail and mutual recursion at a depth of 100 000;
-- errors in every position;
-- concurrent reruns of one fused value;
-- fairness: two endless fused loops on one compute thread both make progress and `timeout` cancels
-  them. This test hangs if the cede is removed.
+- **What is fused:**
+  - cats-effect: `pure`, `delay`, `unit`, `raiseError`, `map`, `flatMap`, `*>`, `>>`, `as`,
+    `void`, `handleErrorWith` and `attempt`;
+  - ZIO: `succeed`, `fail`, `die`, `attempt`, `map`, `flatMap`, `*>`, `as`, `catchAll` and
+    `either`;
+  - on both: `if` and `match`, and local `def`s, which become `while` loops when they recurse.
 
-## Semantics and limits
+  Everything else is left as a call: your methods, `Ref`, `sleep`, `IO.both`, masks. The effects
+  you pass to such calls are fused too.
+- **Not fused:** code written against `F[_]: Sync`, and methods called from the block (wrap them
+  too).
+- **Fairness:** a fused loop yields every 1024 iterations, as cats-effect does, so it stays fair
+  and cancelable.
+- **Seeing the result:** `IOFuse.show { ... }` prints the generated code.
+- **Debugging:** on cats-effect, fused steps don't show up in async traces. Compile with
+  `-Diofuse.fuse=off` to turn fusing off everywhere. ZIO traces still name your lines.
+- **Compile-time notes:** a rare case is a local def whose body starts with a `var`, a lazy val or
+  another def. There, the compiler notes where its build order could differ from the plain code.
+  `-Diofuse.notes=off` silences the notes.
 
-- **Construction is assumed pure.** An `IO`-typed expression may be *built* later than in the plain
-  code (after earlier steps ran). For example, `a *> b` builds `b` after `a` runs. Running it is
-  unchanged.
-- **Visibility.** Only code written inside the block is compiled. These stay opaque:
-  - non-`inline` methods;
-  - `Ref`/`Deferred`;
-  - `F[_]: Sync` code.
-- **Concrete `IO` only.** ZIO isn't done yet.
-- **Local defs** must have one parameter list and no type parameters. A block that contains other
-  definitions (classes, polymorphic defs) is left unfused.
-- **Cancelation and preemption** only happen at opaque calls and at the loop cedes. A synchronous
-  stretch runs uninterrupted, like one big `IO.delay`.
-- **Fatal errors:** `IO.raiseError(fatal)` becomes a `throw`, so the runtime treats it as fatal.
+## References
 
-## Next
-
-- Frame-based continuations, to cut allocation on opaque-heavy code.
-- ZIO.
-- A fuzzer like Ström's.
-- `TestControl` tests around `sleep` and timeouts.
+- O. Kiselyov, A. Biboudis, N. Palladinos, Y. Smaragdakis. *Stream Fusion, to Completeness.*
+  POPL 2017. The staging idea behind Ström, applied here to effect code.
+- R. Elizarov, M. Belyaev, M. Akhin, I. Usmanov. *Kotlin Coroutines: Design and Implementation.*
+  Onward! 2021. Also the [coroutines design document](https://github.com/Kotlin/KEEP/blob/master/proposals/coroutines.md).
+  Its state machines on one continuation object, with spilled locals cleared once they are dead,
+  are the model for iofuse's optional frames (`fusedWith(.., frames = true)`).
+- [cats-effect benchmarks](https://github.com/typelevel/cats-effect/tree/v3.7.1/benchmarks/src/main/scala/cats/effect/benchmarks)
+  (v3.7.1, Apache 2.0). Their programs are copied, unchanged, in `CEBench.scala`.
+- ZIO's runtime runs the start of a program on the calling thread. The benchmarks therefore start
+  each ZIO program with `ZIO.yieldNow`, so that ZIO and cats-effect are both measured on their
+  own thread pools.

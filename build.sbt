@@ -15,7 +15,7 @@ lazy val docSettings = Seq(
 )
 
 lazy val root = (project in file("."))
-  .aggregate(core, fs2, zio, loom, bench)
+  .aggregate(core, fs2, zio, loom, effect, bench)
   .settings(publish / skip := true)
 
 // strom-core: zero dependencies beyond the Scala 3 standard library.
@@ -73,9 +73,25 @@ lazy val loom = (project in file("loom"))
     Test / fork := true,
   )
 
-// JMH benchmarks: fused Ström vs plain fs2 / ZStream (not published).
+// strom-effect: compiles plain cats-effect IO / ZIO code into direct code (StromEffect.fused).
+lazy val effect = (project in file("effect"))
+  .settings(docSettings)
+  .settings(
+    name := "strom-effect",
+    libraryDependencies ++= Seq("org.typelevel" %% "cats-effect" % "3.7.1", "dev.zio" %% "zio" % "2.1.26") ++ testDeps,
+    // Virtual time for the tests around sleep and timeouts.
+    libraryDependencies ++= Seq("org.typelevel" %% "cats-effect-testkit" % "3.7.1" % Test, "dev.zio" %% "zio-test" % "2.1.26" % Test),
+    Compile / doc / scalacOptions += "-skip-by-id:strom.effect.internal",
+    Test / fork := true,
+    Test / scalacOptions += "-Xcheck-macros",
+    Test / sourceGenerators += Def.task(EffectFuzzGen((Test / sourceManaged).value)).taskValue,
+    // The generated fuzz programs call defs by value after effects on purpose: no notes for those.
+    Test / compile := (Test / compile).dependsOn(Def.task { sys.props("strom.effect.notes") = "off" }).value,
+  )
+
+// JMH benchmarks: fused Ström vs plain fs2 / ZStream / IO / ZIO (not published).
 lazy val bench = (project in file("bench"))
-  .dependsOn(core % "compile->compile;compile->test", fs2, zio, loom)
+  .dependsOn(core % "compile->compile;compile->test", fs2, zio, loom, effect)
   .enablePlugins(JmhPlugin)
   .settings(
     name := "strom-bench",
@@ -83,23 +99,3 @@ lazy val bench = (project in file("bench"))
     libraryDependencies += "dev.zio" %% "zio-streams" % "2.1.26",
   )
 
-// Prototype, not part of Ström: fuse plain cats-effect IO blocks (proto/iofuse/README.md).
-// Not aggregated into root and not published.
-lazy val iofuse = (project in file("proto/iofuse"))
-  .settings(
-    name := "iofuse",
-    publish / skip := true,
-    libraryDependencies ++= Seq("org.typelevel" %% "cats-effect" % "3.7.1", "dev.zio" %% "zio" % "2.1.26") ++ testDeps,
-    // Virtual time for the tests around sleep and timeouts.
-    libraryDependencies ++= Seq("org.typelevel" %% "cats-effect-testkit" % "3.7.1" % Test, "dev.zio" %% "zio-test" % "2.1.26" % Test),
-    Test / fork := true,
-    Test / scalacOptions += "-Xcheck-macros",
-    Test / sourceGenerators += Def.task(IOFuzzGen((Test / sourceManaged).value)).taskValue,
-    // The generated fuzz programs call defs by value after effects on purpose: no notes for those.
-    Test / compile := (Test / compile).dependsOn(Def.task { sys.props("iofuse.notes") = "off" }).value,
-  )
-
-lazy val iofuseBench = (project in file("proto/iofuse/bench"))
-  .dependsOn(iofuse)
-  .enablePlugins(JmhPlugin)
-  .settings(name := "iofuse-bench", publish / skip := true)
